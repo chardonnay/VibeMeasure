@@ -306,20 +306,24 @@ final class UsageRefreshStore: ObservableObject {
                 errorsByProvider.removeValue(forKey: provider.id)
             } else {
                 liveUsageByProvider.removeValue(forKey: provider.id)
-                errorsByProvider[provider.id] = "No Codex CLI token_count data found in ~/.codex/sessions."
+                errorsByProvider[provider.id] = "No live usage data found for \(provider.displayName)."
             }
             lastPulledAtByProvider[provider.id] = now
         } catch {
             liveUsageByProvider.removeValue(forKey: provider.id)
-            errorsByProvider[provider.id] = "Codex CLI data could not be read: \(error.localizedDescription)"
+            errorsByProvider[provider.id] = "\(provider.displayName) live usage could not be read: \(error.localizedDescription)"
             lastPulledAtByProvider[provider.id] = now
         }
     }
 
     private func readUsage(for provider: ProviderSettings) throws -> ProviderLiveUsage? {
         switch provider.id {
+        case "claude":
+            try ClaudeCodeUsageReader().readLatestUsage()
         case "codex":
             try CodexCliUsageReader().readLatestUsage()
+        case "gemini":
+            try GeminiCliUsageReader().readLatestUsage()
         case "minimax":
             try MiniMaxCliUsageReader(commandHint: provider.commandHint).readLatestUsage()
         default:
@@ -1459,10 +1463,10 @@ struct WindowPreview: Identifiable {
         }
     }
 
-    private static func codexResetText(resetsAt: Date) -> String {
+    static func resetText(resetsAt: Date) -> String {
         let remainingSeconds = Int(resetsAt.timeIntervalSince(Date()))
         guard remainingSeconds > 0 else {
-            return "Reset time passed; run Codex CLI and refresh"
+            return "Reset time passed; refresh provider"
         }
 
         let days = remainingSeconds / 86_400
@@ -1477,12 +1481,179 @@ struct WindowPreview: Identifiable {
         }
         return "Resets in \(max(minutes, 1))m"
     }
+
+    private static func codexResetText(resetsAt: Date) -> String {
+        resetText(resetsAt: resetsAt)
+    }
+}
+
+private func recentJSONFiles(in root: URL) throws -> [URL] {
+    guard let enumerator = FileManager.default.enumerator(
+        at: root,
+        includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+        options: [.skipsHiddenFiles, .skipsPackageDescendants]
+    ) else {
+        return []
+    }
+
+    var files: [(url: URL, modifiedAt: Date)] = []
+    for case let file as URL in enumerator {
+        guard ["json", "jsonl"].contains(file.pathExtension.lowercased()) else {
+            continue
+        }
+
+        let values = try file.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
+        guard values.isRegularFile == true else {
+            continue
+        }
+        files.append((file, values.contentModificationDate ?? .distantPast))
+    }
+
+    return files
+        .sorted { $0.modifiedAt > $1.modifiedAt }
+        .map(\.url)
+}
+
+private func jsonObjects(in file: URL) throws -> [Any] {
+    let content = try String(contentsOf: file, encoding: .utf8)
+    let lineObjects = content.split(separator: "\n").compactMap { line -> Any? in
+        guard let data = line.data(using: .utf8) else {
+            return nil
+        }
+        return try? JSONSerialization.jsonObject(with: data)
+    }
+
+    if !lineObjects.isEmpty {
+        return lineObjects
+    }
+
+    guard let data = content.data(using: .utf8) else {
+        return []
+    }
+    return [(try JSONSerialization.jsonObject(with: data))]
+}
+
+private func numberValue(for keys: [String], in dictionary: [String: Any]) -> Double? {
+    for key in keys {
+        if let number = dictionary[key] as? NSNumber {
+            return number.doubleValue
+        }
+        if let string = dictionary[key] as? String, let value = Double(string) {
+            return value
+        }
+    }
+    return nil
+}
+
+private func stringValue(for keys: [String], in dictionary: [String: Any]) -> String? {
+    for key in keys {
+        if let value = dictionary[key] as? String, !value.isEmpty {
+            return value
+        }
+    }
+    return nil
+}
+
+private func parseFlexibleDate(_ value: String) -> Date? {
+    let fractionalFormatter = ISO8601DateFormatter()
+    fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = fractionalFormatter.date(from: value) {
+        return date
+    }
+
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime]
+    return formatter.date(from: value)
+}
+
+private func relativeTimestamp(_ date: Date) -> String {
+    let formatter = RelativeDateTimeFormatter()
+    formatter.unitsStyle = .abbreviated
+    return formatter.localizedString(for: date, relativeTo: Date())
 }
 
 struct ProviderLiveUsage {
     let status: String
     let statusColor: Color
     let windows: [WindowPreview]
+}
+
+struct ClaudeCodeUsageReader {
+    func readLatestUsage() throws -> ProviderLiveUsage? {
+        let claudeRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude")
+
+        guard FileManager.default.fileExists(atPath: claudeRoot.path) else {
+            return nil
+        }
+
+        for file in try recentJSONFiles(in: claudeRoot).prefix(120) {
+            for object in try jsonObjects(in: file).reversed() {
+                if let rateLimits = Self.findRateLimits(in: object),
+                   let windows = Self.windows(from: rateLimits),
+                   !windows.isEmpty {
+                    return ProviderLiveUsage(status: "Local", statusColor: .green, windows: windows)
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private static func findRateLimits(in value: Any) -> [String: Any]? {
+        if let dictionary = value as? [String: Any] {
+            if let rateLimits = dictionary["rate_limits"] as? [String: Any] {
+                return rateLimits
+            }
+            if let rateLimits = dictionary["rateLimits"] as? [String: Any] {
+                return rateLimits
+            }
+
+            for nestedValue in dictionary.values {
+                if let found = findRateLimits(in: nestedValue) {
+                    return found
+                }
+            }
+        }
+
+        if let array = value as? [Any] {
+            for nestedValue in array {
+                if let found = findRateLimits(in: nestedValue) {
+                    return found
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private static func windows(from rateLimits: [String: Any]) -> [WindowPreview]? {
+        let candidates: [(keys: [String], fallbackName: String, mode: DisplayMode)] = [
+            (["five_hour", "fiveHour", "5h", "five_hours"], "5-Hour", .fiveHours),
+            (["seven_day", "sevenDay", "7d", "weekly"], "7-Day", .oneWeek),
+            (["monthly", "month", "one_month"], "1 Month", .oneMonth)
+        ]
+
+        return candidates.compactMap { candidate in
+            guard let window = candidate.keys.compactMap({ rateLimits[$0] as? [String: Any] }).first else {
+                return nil
+            }
+
+            let usedPercent = numberValue(for: ["used_percentage", "usedPercent", "usage_percent", "usagePercent"], in: window)
+                ?? numberValue(for: ["used_percent", "usedPercent"], in: window)
+                ?? 0
+            let resetsAt = numberValue(for: ["resets_at", "resetsAt", "reset_at", "resetAt"], in: window)
+            let resetText = resetsAt.map { WindowPreview.resetText(resetsAt: Date(timeIntervalSince1970: $0)) }
+                ?? "Claude Code statusline window"
+
+            return WindowPreview(
+                name: stringValue(for: ["name", "label"], in: window) ?? candidate.fallbackName,
+                percent: min(max(usedPercent / 100, 0), 1),
+                resetText: resetText,
+                displayModes: [candidate.mode]
+            )
+        }
+    }
 }
 
 struct CodexCliUsageReader {
@@ -1644,6 +1815,102 @@ struct CodexRateLimitWindow: Decodable {
         case resetsAt = "resets_at"
         case usedPercent = "used_percent"
         case windowMinutes = "window_minutes"
+    }
+}
+
+struct GeminiCliUsageReader {
+    func readLatestUsage() throws -> ProviderLiveUsage? {
+        let geminiRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gemini")
+            .appendingPathComponent("tmp")
+
+        guard FileManager.default.fileExists(atPath: geminiRoot.path) else {
+            return nil
+        }
+
+        var latestEvent: GeminiTokenEvent?
+        for file in try Self.chatSessionFiles(in: geminiRoot).prefix(120) {
+            for object in try jsonObjects(in: file) {
+                guard let event = GeminiTokenEvent(object: object) else {
+                    continue
+                }
+                if latestEvent == nil || event.timestamp > latestEvent!.timestamp {
+                    latestEvent = event
+                }
+            }
+        }
+
+        guard let latestEvent else {
+            return nil
+        }
+
+        return ProviderLiveUsage(
+            status: "Local",
+            statusColor: .green,
+            windows: [
+                WindowPreview(
+                    name: latestEvent.model.isEmpty ? "Token usage" : latestEvent.model,
+                    percent: 0,
+                    resetText: "Latest Gemini CLI event: \(relativeTimestamp(latestEvent.timestamp)); total tokens \(latestEvent.totalTokens)"
+                )
+            ]
+        )
+    }
+
+    private static func chatSessionFiles(in root: URL) throws -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return []
+        }
+
+        var files: [(url: URL, modifiedAt: Date)] = []
+        for case let file as URL in enumerator {
+            guard ["json", "jsonl"].contains(file.pathExtension.lowercased()),
+                  file.deletingLastPathComponent().lastPathComponent == "chats" else {
+                continue
+            }
+
+            let values = try file.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
+            guard values.isRegularFile == true else {
+                continue
+            }
+
+            files.append((file, values.contentModificationDate ?? .distantPast))
+        }
+
+        return files
+            .sorted { $0.modifiedAt > $1.modifiedAt }
+            .map(\.url)
+    }
+}
+
+struct GeminiTokenEvent {
+    let timestamp: Date
+    let model: String
+    let totalTokens: Int
+
+    init?(object: Any) {
+        guard let dictionary = object as? [String: Any],
+              let tokenDictionary = dictionary["tokens"] as? [String: Any] else {
+            return nil
+        }
+
+        let timestamp = stringValue(for: ["timestamp", "createdAt", "updatedAt"], in: dictionary)
+            .flatMap(parseFlexibleDate)
+            ?? Date.distantPast
+        let model = stringValue(for: ["model"], in: dictionary) ?? ""
+        let totalTokens = Int(numberValue(for: ["total"], in: tokenDictionary) ?? 0)
+
+        guard totalTokens > 0 else {
+            return nil
+        }
+
+        self.timestamp = timestamp
+        self.model = model
+        self.totalTokens = totalTokens
     }
 }
 
@@ -1996,7 +2263,7 @@ final class ProviderSettingsStore: ObservableObject {
 
     private let storageKey = "providerSettings.v1"
     private let storageVersionKey = "providerSettings.version"
-    private static let currentStorageVersion = 4
+    private static let currentStorageVersion = 5
 
     init() {
         var loadedProviders = loadProviders()
@@ -2010,6 +2277,9 @@ final class ProviderSettingsStore: ObservableObject {
         }
         if storedVersion < 4 {
             loadedProviders = Self.providersWithMiniMaxAdapterDefaults(loadedProviders)
+        }
+        if storedVersion < 5 {
+            loadedProviders = Self.providersWithVerifiedAdapterDefaults(loadedProviders)
         }
         if storedVersion < Self.currentStorageVersion {
             save(loadedProviders)
@@ -2091,10 +2361,10 @@ final class ProviderSettingsStore: ObservableObject {
     }
 
     private static let defaultProviders: [ProviderSettings] = [
-        .builtIn(id: "claude", displayName: "Claude Code", commandHint: "claude", symbolName: "sparkle"),
+        .builtIn(id: "claude", displayName: "Claude Code", commandHint: "claude", symbolName: "sparkle", dataSource: .localAdapter),
         .builtIn(id: "codex", displayName: "Codex CLI", commandHint: "codex", symbolName: "swirl.circle.righthalf.filled", dataSource: .localAdapter),
         .builtIn(id: "devin-terminal", displayName: "Devin for Terminal", commandHint: "", symbolName: "terminal"),
-        .builtIn(id: "gemini", displayName: "Gemini CLI", commandHint: "gemini", symbolName: "diamond"),
+        .builtIn(id: "gemini", displayName: "Gemini CLI", commandHint: "gemini", symbolName: "diamond", dataSource: .localAdapter),
         .builtIn(id: "opencode", displayName: "OpenCode", commandHint: "opencode", symbolName: "curlybraces"),
         .builtIn(id: "hermes", displayName: "Hermes", commandHint: "", symbolName: "paperplane"),
         .builtIn(id: "kimi-cli", displayName: "Kimi CLI", commandHint: "", symbolName: "moon"),
@@ -2130,6 +2400,20 @@ final class ProviderSettingsStore: ObservableObject {
             if migratedProvider.commandHint.isEmpty {
                 migratedProvider.commandHint = "mmx"
             }
+            if migratedProvider.dataSource == .manual, migratedProvider.manualWindows.isEmpty {
+                migratedProvider.dataSource = .localAdapter
+            }
+            return migratedProvider
+        }
+    }
+
+    private static func providersWithVerifiedAdapterDefaults(_ providers: [ProviderSettings]) -> [ProviderSettings] {
+        providers.map { provider in
+            guard ["claude", "gemini"].contains(provider.id) else {
+                return provider
+            }
+
+            var migratedProvider = provider
             if migratedProvider.dataSource == .manual, migratedProvider.manualWindows.isEmpty {
                 migratedProvider.dataSource = .localAdapter
             }
@@ -2238,7 +2522,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
     }
 
     var hasVerifiedLocalAdapter: Bool {
-        id == "codex" || id == "minimax"
+        ["claude", "codex", "gemini", "minimax"].contains(id)
     }
 
     var canReadLiveUsage: Bool {
