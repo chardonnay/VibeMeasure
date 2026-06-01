@@ -124,8 +124,12 @@ struct UsagePopover: View {
 
             Spacer()
 
-            Toggle("Launch at Login", isOn: $launchAtLogin)
-                .toggleStyle(.switch)
+            Toggle(isOn: $launchAtLogin) {
+                Image(systemName: "poweron")
+            }
+            .toggleStyle(.button)
+            .labelStyle(.iconOnly)
+            .help("Launch at Login")
 
             Spacer()
 
