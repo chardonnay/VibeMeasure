@@ -7,6 +7,7 @@ import UserNotifications
 struct VibeMeasureApp: App {
     @AppStorage("displayMode") private var displayMode = DisplayMode.providerCycles.rawValue
     @AppStorage("launchAtLogin") private var launchAtLogin = false
+    @AppStorage("usagePopoverHeight") private var usagePopoverHeight = 620.0
     @StateObject private var appModel = VibeMeasureAppModel()
 
     var body: some Scene {
@@ -19,7 +20,7 @@ struct VibeMeasureApp: App {
                 providerStore: appModel.providerStore,
                 usageStore: appModel.usageStore
             )
-            .frame(width: 460, height: 620)
+            .frame(width: 460, height: usagePopoverHeight)
         }
         .menuBarExtraStyle(.window)
 
@@ -27,6 +28,7 @@ struct VibeMeasureApp: App {
             SettingsView(
                 displayMode: $displayMode,
                 launchAtLogin: $launchAtLogin,
+                usagePopoverHeight: $usagePopoverHeight,
                 providerStore: appModel.providerStore
             )
         }
@@ -356,6 +358,7 @@ struct ProviderSection: View {
 struct SettingsView: View {
     @Binding var displayMode: String
     @Binding var launchAtLogin: Bool
+    @Binding var usagePopoverHeight: Double
     @ObservedObject var providerStore: ProviderSettingsStore
     @State private var selectedProviderID: String?
 
@@ -374,6 +377,15 @@ struct SettingsView: View {
                     ForEach(DisplayMode.allCases) { mode in
                         Text(mode.rawValue).tag(mode.rawValue)
                     }
+                }
+                LabeledContent("Usage window height") {
+                    Stepper(
+                        "\(Int(usagePopoverHeight)) px",
+                        value: $usagePopoverHeight,
+                        in: 480...1_000,
+                        step: 20
+                    )
+                    .frame(width: 140)
                 }
                 Toggle("Launch at Login", isOn: $launchAtLogin)
             }
