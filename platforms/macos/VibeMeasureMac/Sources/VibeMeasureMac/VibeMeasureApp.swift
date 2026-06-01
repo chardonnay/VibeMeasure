@@ -45,6 +45,7 @@ struct UsagePopover: View {
     @Binding var displayMode: DisplayMode
     @Binding var launchAtLogin: Bool
     @ObservedObject var providerStore: ProviderSettingsStore
+    @State private var showsLaunchAtLoginTooltip = false
 
     private var providers: [ProviderPreview] {
         providerStore.providers
@@ -125,13 +126,35 @@ struct UsagePopover: View {
             Spacer()
 
             Toggle(isOn: $launchAtLogin) {
-                Image(systemName: "person.crop.circle.badge.clock")
-                    .font(.system(size: 15, weight: .semibold))
-                    .frame(width: 26, height: 22)
+                Image(systemName: "rectangle.portrait.and.arrow.right")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 34, height: 26)
             }
             .toggleStyle(.button)
             .labelStyle(.iconOnly)
-            .help("Launch at Login")
+            .overlay(alignment: .top) {
+                if showsLaunchAtLoginTooltip {
+                    Text("Launch at Login")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(.quaternary, lineWidth: 1)
+                        }
+                        .fixedSize()
+                        .offset(y: -34)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                        .zIndex(1)
+                }
+            }
+            .onHover { isHovering in
+                withAnimation(.easeOut(duration: 0.12)) {
+                    showsLaunchAtLoginTooltip = isHovering
+                }
+            }
 
             Spacer()
 
