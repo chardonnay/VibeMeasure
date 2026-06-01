@@ -17,7 +17,8 @@ macOS status: the menu-bar app opens a native Reports window from the Usage foot
 
 - CLI `.xlsx`: generated with `rust_xlsxwriter`.
 - macOS snapshot `.xlsx`: generated as an open OOXML workbook.
-- `.pdf`: generated as a simple open PDF document.
+- CLI `.pdf`: generated as a simple open PDF document.
+- macOS snapshot `.pdf`: rendered as a styled native report with header, summary cards, and table layout.
 
 Exports include token counts and source notes. Costs are omitted unless provider-reported cost, verified pricing, or manual pricing exists.
 

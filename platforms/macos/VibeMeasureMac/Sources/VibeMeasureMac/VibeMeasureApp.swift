@@ -712,6 +712,13 @@ struct ReportSnapshotRow: Identifiable {
     let notes: String
 }
 
+private extension ReportSnapshotRow {
+    var usageFraction: Double {
+        let rawValue = percentText.replacingOccurrences(of: "%", with: "")
+        return min(max((Double(rawValue) ?? 0) / 100, 0), 1)
+    }
+}
+
 enum ReportExportFormat {
     case xlsx
     case pdf
@@ -730,6 +737,17 @@ struct SnapshotReport {
     let periodLabel: String
     let generatedAt: Date
     let rows: [ReportSnapshotRow]
+}
+
+private extension SnapshotReport {
+    var averageUsagePercentText: String {
+        guard !rows.isEmpty else {
+            return "0%"
+        }
+
+        let average = rows.map(\.usageFraction).reduce(0, +) / Double(rows.count)
+        return "\(Int((average * 100).rounded()))%"
+    }
 }
 
 enum ReportExportError: LocalizedError {
@@ -793,7 +811,7 @@ struct SnapshotReportExporter {
     }
 
     private static func writePDF(_ report: SnapshotReport, to url: URL) throws {
-        try minimalPDFData(lines: report.pdfLines()).write(to: url, options: .atomic)
+        try DesignedPDFReportRenderer.write(report, to: url)
     }
 
     private static func createDirectory(_ path: String, in root: URL) throws {
@@ -871,50 +889,6 @@ struct SnapshotReportExporter {
         """
     }
 
-    private static func minimalPDFData(lines: [String]) -> Data {
-        let pages = lines.chunked(into: 44)
-        var objects: [String] = []
-        objects.append("<< /Type /Catalog /Pages 2 0 R >>\n")
-
-        let pageObjectNumbers = pages.indices.map { 4 + $0 * 2 }
-        let kids = pageObjectNumbers.map { "\($0) 0 R" }.joined(separator: " ")
-        objects.append("<< /Type /Pages /Kids [\(kids)] /Count \(pages.count) >>\n")
-        objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\n")
-
-        for (pageIndex, pageLines) in pages.enumerated() {
-            let pageObjectNumber = 4 + pageIndex * 2
-            let contentObjectNumber = pageObjectNumber + 1
-            let stream = pdfStream(for: pageLines)
-            objects.append(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents \(contentObjectNumber) 0 R >>\n"
-            )
-            objects.append("<< /Length \(stream.utf8.count) >>\nstream\n\(stream)endstream\n")
-        }
-
-        var pdf = "%PDF-1.4\n"
-        var offsets: [Int] = []
-        for (index, object) in objects.enumerated() {
-            offsets.append(pdf.utf8.count)
-            pdf += "\(index + 1) 0 obj\n\(object)endobj\n"
-        }
-
-        let xrefStart = pdf.utf8.count
-        pdf += "xref\n0 \(objects.count + 1)\n0000000000 65535 f \n"
-        for offset in offsets {
-            pdf += String(format: "%010d 00000 n \n", offset)
-        }
-        pdf += "trailer\n<< /Size \(objects.count + 1) /Root 1 0 R >>\nstartxref\n\(xrefStart)\n%%EOF\n"
-        return Data(pdf.utf8)
-    }
-
-    private static func pdfStream(for lines: [String]) -> String {
-        let escapedLines = lines
-            .flatMap { line in line.wrapped(maxLength: 98) }
-            .map { "(\(pdfEscaped($0))) Tj\n0 -15 Td" }
-            .joined(separator: "\n")
-        return "BT\n/F1 10 Tf\n48 760 Td\n\(escapedLines)\nET\n"
-    }
-
     private static func columnName(for index: Int) -> String {
         let scalars = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
         if index < scalars.count {
@@ -932,11 +906,270 @@ struct SnapshotReportExporter {
             .replacingOccurrences(of: "'", with: "&apos;")
     }
 
-    private static func pdfEscaped(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "(", with: "\\(")
-            .replacingOccurrences(of: ")", with: "\\)")
+}
+
+struct DesignedPDFReportRenderer {
+    private static let pageSize = CGSize(width: 612, height: 792)
+    private static let margin: CGFloat = 42
+    private static let headerHeight: CGFloat = 118
+    private static let cardHeight: CGFloat = 70
+    private static let tableHeaderHeight: CGFloat = 30
+    private static let rowHeight: CGFloat = 38
+
+    static func write(_ report: SnapshotReport, to url: URL) throws {
+        let data = NSMutableData()
+        var mediaBox = CGRect(origin: .zero, size: pageSize)
+        guard let consumer = CGDataConsumer(data: data as CFMutableData),
+              let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        let rowsPerFirstPage = max(Int((pageSize.height - headerHeight - cardHeight - tableHeaderHeight - 145) / rowHeight), 1)
+        let rowsPerFollowingPage = max(Int((pageSize.height - headerHeight - tableHeaderHeight - 95) / rowHeight), 1)
+        var remainingRows = report.rows
+        var pageNumber = 1
+
+        repeat {
+            let isFirstPage = pageNumber == 1
+            let pageRows = Array(remainingRows.prefix(isFirstPage ? rowsPerFirstPage : rowsPerFollowingPage))
+            remainingRows.removeFirst(min(pageRows.count, remainingRows.count))
+
+            context.beginPDFPage(nil)
+            drawPage(report: report, rows: pageRows, pageNumber: pageNumber, isFirstPage: isFirstPage, in: context)
+            context.endPDFPage()
+            pageNumber += 1
+        } while !remainingRows.isEmpty
+
+        context.closePDF()
+        try (data as Data).write(to: url, options: .atomic)
+    }
+
+    private static func drawPage(
+        report: SnapshotReport,
+        rows: [ReportSnapshotRow],
+        pageNumber: Int,
+        isFirstPage: Bool,
+        in context: CGContext
+    ) {
+        let graphicsContext = NSGraphicsContext(cgContext: context, flipped: false)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = graphicsContext
+        defer {
+            NSGraphicsContext.restoreGraphicsState()
+        }
+
+        drawBackground()
+        drawHeader(report: report, pageNumber: pageNumber)
+
+        var tableTop = pageSize.height - headerHeight - 28
+        if isFirstPage {
+            drawSummaryCards(report: report, top: tableTop)
+            tableTop -= cardHeight + 26
+        }
+
+        drawTable(rows: rows, top: tableTop)
+        drawFooter(pageNumber: pageNumber)
+    }
+
+    private static func drawBackground() {
+        NSColor(calibratedRed: 0.96, green: 0.97, blue: 0.98, alpha: 1).setFill()
+        NSBezierPath(rect: CGRect(origin: .zero, size: pageSize)).fill()
+
+        NSColor.white.setFill()
+        roundedRect(
+            x: margin - 12,
+            y: margin - 10,
+            width: pageSize.width - margin * 2 + 24,
+            height: pageSize.height - margin * 2 + 20,
+            radius: 12
+        ).fill()
+    }
+
+    private static func drawHeader(report: SnapshotReport, pageNumber: Int) {
+        NSColor(calibratedRed: 0.08, green: 0.11, blue: 0.16, alpha: 1).setFill()
+        roundedRect(
+            x: margin,
+            y: pageSize.height - margin - 86,
+            width: pageSize.width - margin * 2,
+            height: 86,
+            radius: 12
+        ).fill()
+
+        NSColor(calibratedRed: 0.15, green: 0.82, blue: 0.39, alpha: 1).setFill()
+        roundedRect(
+            x: margin + 18,
+            y: pageSize.height - margin - 70,
+            width: 8,
+            height: 48,
+            radius: 4
+        ).fill()
+
+        drawText(
+            "VibeMeasure Report",
+            in: CGRect(x: margin + 40, y: pageSize.height - margin - 40, width: 310, height: 22),
+            font: .systemFont(ofSize: 20, weight: .bold),
+            color: .white
+        )
+        drawText(
+            "\(report.periodLabel) | Snapshot export",
+            in: CGRect(x: margin + 40, y: pageSize.height - margin - 64, width: 330, height: 18),
+            font: .systemFont(ofSize: 11, weight: .medium),
+            color: NSColor(calibratedWhite: 0.82, alpha: 1)
+        )
+        drawText(
+            report.generatedAt.formatted(date: .abbreviated, time: .shortened),
+            in: CGRect(x: pageSize.width - margin - 180, y: pageSize.height - margin - 39, width: 160, height: 18),
+            font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium),
+            color: NSColor(calibratedWhite: 0.88, alpha: 1),
+            alignment: .right
+        )
+        drawText(
+            "Page \(pageNumber)",
+            in: CGRect(x: pageSize.width - margin - 180, y: pageSize.height - margin - 62, width: 160, height: 18),
+            font: .systemFont(ofSize: 10, weight: .regular),
+            color: NSColor(calibratedWhite: 0.72, alpha: 1),
+            alignment: .right
+        )
+    }
+
+    private static func drawSummaryCards(report: SnapshotReport, top: CGFloat) {
+        let cardWidth = (pageSize.width - margin * 2 - 20) / 3
+        let averageUsage = report.averageUsagePercentText
+        let cards = [
+            ("Providers", "\(Set(report.rows.map(\.providerName)).count)", "Enabled in report"),
+            ("Windows", "\(report.rows.count)", "Visible usage windows"),
+            ("Avg. Usage", averageUsage, "Snapshot only")
+        ]
+
+        for (index, card) in cards.enumerated() {
+            let x = margin + CGFloat(index) * (cardWidth + 10)
+            let y = top - cardHeight
+            NSColor(calibratedRed: 0.98, green: 0.99, blue: 0.99, alpha: 1).setFill()
+            roundedRect(x: x, y: y, width: cardWidth, height: cardHeight, radius: 10).fill()
+            NSColor(calibratedWhite: 0.88, alpha: 1).setStroke()
+            roundedRect(x: x, y: y, width: cardWidth, height: cardHeight, radius: 10).stroke()
+
+            drawText(
+                card.0,
+                in: CGRect(x: x + 14, y: y + 42, width: cardWidth - 28, height: 14),
+                font: .systemFont(ofSize: 9, weight: .semibold),
+                color: NSColor(calibratedWhite: 0.36, alpha: 1)
+            )
+            drawText(
+                card.1,
+                in: CGRect(x: x + 14, y: y + 19, width: cardWidth - 28, height: 22),
+                font: .systemFont(ofSize: 19, weight: .bold),
+                color: NSColor(calibratedRed: 0.08, green: 0.11, blue: 0.16, alpha: 1)
+            )
+            drawText(
+                card.2,
+                in: CGRect(x: x + 14, y: y + 7, width: cardWidth - 28, height: 12),
+                font: .systemFont(ofSize: 8.5, weight: .regular),
+                color: NSColor(calibratedWhite: 0.48, alpha: 1)
+            )
+        }
+    }
+
+    private static func drawTable(rows: [ReportSnapshotRow], top: CGFloat) {
+        let tableX = margin
+        let tableWidth = pageSize.width - margin * 2
+        let columnWidths: [CGFloat] = [110, 82, 108, 88, 72, tableWidth - 460]
+        let headers = ["Provider", "Plan", "Window", "Usage", "Source", "Notes"]
+
+        NSColor(calibratedRed: 0.11, green: 0.14, blue: 0.20, alpha: 1).setFill()
+        roundedRect(x: tableX, y: top - tableHeaderHeight, width: tableWidth, height: tableHeaderHeight, radius: 8).fill()
+
+        var currentX = tableX + 10
+        for (index, header) in headers.enumerated() {
+            drawText(
+                header,
+                in: CGRect(x: currentX, y: top - 20, width: columnWidths[index] - 12, height: 13),
+                font: .systemFont(ofSize: 8.5, weight: .bold),
+                color: .white
+            )
+            currentX += columnWidths[index]
+        }
+
+        for (rowIndex, row) in rows.enumerated() {
+            let y = top - tableHeaderHeight - CGFloat(rowIndex + 1) * rowHeight
+            (rowIndex.isMultiple(of: 2)
+                ? NSColor(calibratedWhite: 0.985, alpha: 1)
+                : NSColor(calibratedRed: 0.95, green: 0.97, blue: 0.98, alpha: 1)
+            ).setFill()
+            NSBezierPath(rect: CGRect(x: tableX, y: y, width: tableWidth, height: rowHeight)).fill()
+
+            let values = [row.providerName, row.planName, row.windowName, row.percentText, row.source, row.notes]
+            currentX = tableX + 10
+            for (columnIndex, value) in values.enumerated() {
+                let rect = CGRect(x: currentX, y: y + 12, width: columnWidths[columnIndex] - 12, height: 16)
+                if columnIndex == 3 {
+                    drawUsageCell(row: row, in: rect)
+                } else {
+                    drawText(
+                        value,
+                        in: rect,
+                        font: .systemFont(ofSize: columnIndex == 0 ? 9.5 : 8.5, weight: columnIndex == 0 ? .semibold : .regular),
+                        color: NSColor(calibratedWhite: columnIndex == 5 ? 0.38 : 0.18, alpha: 1)
+                    )
+                }
+                currentX += columnWidths[columnIndex]
+            }
+        }
+    }
+
+    private static func drawUsageCell(row: ReportSnapshotRow, in rect: CGRect) {
+        let barRect = CGRect(x: rect.minX, y: rect.minY + 1, width: 44, height: 8)
+        NSColor(calibratedWhite: 0.88, alpha: 1).setFill()
+        roundedRect(x: barRect.minX, y: barRect.minY, width: barRect.width, height: barRect.height, radius: 4).fill()
+
+        let fillWidth = barRect.width * CGFloat(row.usageFraction)
+        NSColor(calibratedRed: 0.15, green: 0.82, blue: 0.39, alpha: 1).setFill()
+        roundedRect(x: barRect.minX, y: barRect.minY, width: fillWidth, height: barRect.height, radius: 4).fill()
+
+        drawText(
+            row.percentText,
+            in: CGRect(x: rect.minX + 50, y: rect.minY - 1, width: rect.width - 50, height: 14),
+            font: .monospacedDigitSystemFont(ofSize: 8.5, weight: .semibold),
+            color: NSColor(calibratedWhite: 0.18, alpha: 1)
+        )
+    }
+
+    private static func drawFooter(pageNumber: Int) {
+        NSColor(calibratedWhite: 0.84, alpha: 1).setStroke()
+        NSBezierPath.strokeLine(
+            from: CGPoint(x: margin, y: margin - 2),
+            to: CGPoint(x: pageSize.width - margin, y: margin - 2)
+        )
+        drawText(
+            "Snapshot export. Historical aggregation begins after SQLite event persistence is connected.",
+            in: CGRect(x: margin, y: margin - 25, width: pageSize.width - margin * 2, height: 14),
+            font: .systemFont(ofSize: 8.5, weight: .regular),
+            color: NSColor(calibratedWhite: 0.46, alpha: 1)
+        )
+    }
+
+    private static func drawText(
+        _ text: String,
+        in rect: CGRect,
+        font: NSFont,
+        color: NSColor,
+        alignment: NSTextAlignment = .left
+    ) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = alignment
+        paragraph.lineBreakMode = .byTruncatingTail
+        NSString(string: text).draw(
+            in: rect,
+            withAttributes: [
+                .font: font,
+                .foregroundColor: color,
+                .paragraphStyle: paragraph
+            ]
+        )
+    }
+
+    private static func roundedRect(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, radius: CGFloat) -> NSBezierPath {
+        NSBezierPath(roundedRect: CGRect(x: x, y: y, width: width, height: height), xRadius: radius, yRadius: radius)
     }
 }
 
@@ -954,55 +1187,6 @@ private extension SnapshotReport {
         }
     }
 
-    func pdfLines() -> [String] {
-        var lines = [
-            "VibeMeasure Report",
-            "Generated: \(generatedAt.formatted(date: .abbreviated, time: .standard))",
-            "Period: \(periodLabel)",
-            "Scope: Latest snapshot export. Historical aggregation starts after SQLite event persistence is connected.",
-            "",
-            "Provider | Plan | Window | Usage | Source | Notes"
-        ]
-
-        lines += rows.map { row in
-            "\(row.providerName) | \(row.planName) | \(row.windowName) | \(row.percentText) | \(row.source) | \(row.notes)"
-        }
-        return lines
-    }
-}
-
-private extension Array {
-    func chunked(into size: Int) -> [[Element]] {
-        stride(from: 0, to: count, by: size).map { index in
-            Array(self[index..<Swift.min(index + size, count)])
-        }
-    }
-}
-
-private extension String {
-    func wrapped(maxLength: Int) -> [String] {
-        guard count > maxLength else {
-            return [self]
-        }
-
-        var lines: [String] = []
-        var currentLine = ""
-        for word in split(separator: " ") {
-            let next = currentLine.isEmpty ? String(word) : "\(currentLine) \(word)"
-            if next.count > maxLength {
-                if !currentLine.isEmpty {
-                    lines.append(currentLine)
-                }
-                currentLine = String(word)
-            } else {
-                currentLine = next
-            }
-        }
-        if !currentLine.isEmpty {
-            lines.append(currentLine)
-        }
-        return lines.isEmpty ? [self] : lines
-    }
 }
 
 struct SettingsView: View {
