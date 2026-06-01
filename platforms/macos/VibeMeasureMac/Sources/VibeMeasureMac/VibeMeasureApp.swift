@@ -86,20 +86,23 @@ final class UsageRefreshStore: ObservableObject {
     }
 
     func configure(providers: [ProviderSettings]) {
-        self.providers = providers
-
-        let enabledProviderIDs = Set(providers.filter(\.isEnabled).map(\.id))
-        liveUsageByProvider = liveUsageByProvider.filter { enabledProviderIDs.contains($0.key) }
-        lastPulledAtByProvider = lastPulledAtByProvider.filter { enabledProviderIDs.contains($0.key) }
-        errorsByProvider = errorsByProvider.filter { enabledProviderIDs.contains($0.key) }
-        updateRefreshError()
-
+        synchronizeConfiguredProviders(providers)
         pullDueProviders()
     }
 
     func pullNow(providers: [ProviderSettings]) {
-        self.providers = providers
+        synchronizeConfiguredProviders(providers)
         pullDueProviders(force: true)
+    }
+
+    private func synchronizeConfiguredProviders(_ providers: [ProviderSettings]) {
+        self.providers = providers
+
+        let liveProviderIDs = Set(providers.filter(supportsLiveUsage).map(\.id))
+        liveUsageByProvider = liveUsageByProvider.filter { liveProviderIDs.contains($0.key) }
+        lastPulledAtByProvider = lastPulledAtByProvider.filter { liveProviderIDs.contains($0.key) }
+        errorsByProvider = errorsByProvider.filter { liveProviderIDs.contains($0.key) }
+        updateRefreshError()
     }
 
     private func pullDueProviders(force: Bool = false, now: Date = Date()) {
@@ -126,9 +129,7 @@ final class UsageRefreshStore: ObservableObject {
     }
 
     private func shouldPull(provider: ProviderSettings, now: Date, force: Bool) -> Bool {
-        guard provider.isEnabled,
-              provider.id == "codex",
-              provider.dataSource == .localAdapter else {
+        guard supportsLiveUsage(provider) else {
             return false
         }
 
@@ -140,16 +141,24 @@ final class UsageRefreshStore: ObservableObject {
         return now.timeIntervalSince(lastPulledAtByProvider[provider.id] ?? .distantPast) >= interval
     }
 
+    private func supportsLiveUsage(_ provider: ProviderSettings) -> Bool {
+        provider.isEnabled
+            && provider.id == "codex"
+            && provider.dataSource == .localAdapter
+    }
+
     private func pull(provider: ProviderSettings, now: Date) {
         do {
             if let usage = try CodexCliUsageReader().readLatestUsage() {
                 liveUsageByProvider[provider.id] = usage
                 errorsByProvider.removeValue(forKey: provider.id)
             } else {
+                liveUsageByProvider.removeValue(forKey: provider.id)
                 errorsByProvider[provider.id] = "No Codex CLI token_count data found in ~/.codex/sessions."
             }
             lastPulledAtByProvider[provider.id] = now
         } catch {
+            liveUsageByProvider.removeValue(forKey: provider.id)
             errorsByProvider[provider.id] = "Codex CLI data could not be read: \(error.localizedDescription)"
             lastPulledAtByProvider[provider.id] = now
         }
