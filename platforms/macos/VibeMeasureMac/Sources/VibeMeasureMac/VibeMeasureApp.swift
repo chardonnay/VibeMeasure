@@ -7,7 +7,7 @@ import UserNotifications
 struct VibeMeasureApp: App {
     @AppStorage("displayMode") private var displayMode = DisplayMode.providerCycles.rawValue
     @AppStorage("launchAtLogin") private var launchAtLogin = false
-    @StateObject private var providerStore = ProviderSettingsStore()
+    @StateObject private var appModel = VibeMeasureAppModel()
 
     var body: some Scene {
         MenuBarExtra("VibeMeasure", systemImage: "chart.bar.xaxis") {
@@ -17,7 +17,8 @@ struct VibeMeasureApp: App {
                     set: { displayMode = $0.rawValue }
                 ),
                 launchAtLogin: $launchAtLogin,
-                providerStore: providerStore
+                providerStore: appModel.providerStore,
+                usageStore: appModel.usageStore
             )
             .frame(width: 460, height: 620)
         }
@@ -27,7 +28,7 @@ struct VibeMeasureApp: App {
             SettingsView(
                 displayMode: $displayMode,
                 launchAtLogin: $launchAtLogin,
-                providerStore: providerStore
+                providerStore: appModel.providerStore
             )
         }
     }
@@ -42,31 +43,148 @@ enum DisplayMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+@MainActor
+final class VibeMeasureAppModel: ObservableObject {
+    let providerStore: ProviderSettingsStore
+    let usageStore: UsageRefreshStore
+
+    private var cancellables = Set<AnyCancellable>()
+
+    init(
+        providerStore: ProviderSettingsStore = ProviderSettingsStore(),
+        usageStore: UsageRefreshStore = UsageRefreshStore()
+    ) {
+        self.providerStore = providerStore
+        self.usageStore = usageStore
+
+        usageStore.configure(providers: providerStore.providers)
+        providerStore.$providers
+            .sink { [weak usageStore] providers in
+                usageStore?.configure(providers: providers)
+            }
+            .store(in: &cancellables)
+    }
+}
+
+@MainActor
+final class UsageRefreshStore: ObservableObject {
+    @Published private(set) var liveUsageByProvider: [String: ProviderLiveUsage] = [:]
+    @Published private(set) var refreshError: String?
+    @Published private(set) var isRefreshing = false
+    @Published private(set) var lastPulledAtByProvider: [String: Date] = [:]
+
+    private var providers: [ProviderSettings] = []
+    private var errorsByProvider: [String: String] = [:]
+    private var timer: Timer?
+
+    init() {
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.pullDueProviders()
+            }
+        }
+    }
+
+    func configure(providers: [ProviderSettings]) {
+        self.providers = providers
+
+        let enabledProviderIDs = Set(providers.filter(\.isEnabled).map(\.id))
+        liveUsageByProvider = liveUsageByProvider.filter { enabledProviderIDs.contains($0.key) }
+        lastPulledAtByProvider = lastPulledAtByProvider.filter { enabledProviderIDs.contains($0.key) }
+        errorsByProvider = errorsByProvider.filter { enabledProviderIDs.contains($0.key) }
+        updateRefreshError()
+
+        pullDueProviders()
+    }
+
+    func pullNow(providers: [ProviderSettings]) {
+        self.providers = providers
+        pullDueProviders(force: true)
+    }
+
+    private func pullDueProviders(force: Bool = false, now: Date = Date()) {
+        guard !isRefreshing else {
+            return
+        }
+
+        let dueProviders = providers.filter { provider in
+            shouldPull(provider: provider, now: now, force: force)
+        }
+        guard !dueProviders.isEmpty else {
+            return
+        }
+
+        isRefreshing = true
+        defer {
+            isRefreshing = false
+        }
+
+        for provider in dueProviders {
+            pull(provider: provider, now: now)
+        }
+        updateRefreshError()
+    }
+
+    private func shouldPull(provider: ProviderSettings, now: Date, force: Bool) -> Bool {
+        guard provider.isEnabled,
+              provider.id == "codex",
+              provider.dataSource == .localAdapter else {
+            return false
+        }
+
+        if force || lastPulledAtByProvider[provider.id] == nil {
+            return true
+        }
+
+        let interval = TimeInterval(max(provider.pollIntervalMinutes, 1) * 60)
+        return now.timeIntervalSince(lastPulledAtByProvider[provider.id] ?? .distantPast) >= interval
+    }
+
+    private func pull(provider: ProviderSettings, now: Date) {
+        do {
+            if let usage = try CodexCliUsageReader().readLatestUsage() {
+                liveUsageByProvider[provider.id] = usage
+                errorsByProvider.removeValue(forKey: provider.id)
+            } else {
+                errorsByProvider[provider.id] = "No Codex CLI token_count data found in ~/.codex/sessions."
+            }
+            lastPulledAtByProvider[provider.id] = now
+        } catch {
+            errorsByProvider[provider.id] = "Codex CLI data could not be read: \(error.localizedDescription)"
+            lastPulledAtByProvider[provider.id] = now
+        }
+    }
+
+    private func updateRefreshError() {
+        refreshError = errorsByProvider.values.isEmpty
+            ? nil
+            : errorsByProvider.values.sorted().joined(separator: " ")
+    }
+}
+
 struct UsagePopover: View {
     @Binding var displayMode: DisplayMode
     @Binding var launchAtLogin: Bool
     @ObservedObject var providerStore: ProviderSettingsStore
+    @ObservedObject var usageStore: UsageRefreshStore
     @State private var showsLaunchAtLoginTooltip = false
-    @State private var liveUsageByProvider: [String: ProviderLiveUsage] = [:]
-    @State private var refreshError: String?
-    @State private var isRefreshing = false
 
     private var providers: [ProviderPreview] {
         providerStore.providers
             .filter(\.isEnabled)
             .map { provider in
-                ProviderPreview(settings: provider, liveUsage: liveUsageByProvider[provider.id])
+                ProviderPreview(settings: provider, liveUsage: usageStore.liveUsageByProvider[provider.id])
             }
     }
 
     private var statusBadge: (label: String, color: Color) {
-        if refreshError != nil {
+        if usageStore.refreshError != nil {
             return ("Data issue", .red)
         }
-        if isRefreshing {
+        if usageStore.isRefreshing {
             return ("Refreshing", .blue)
         }
-        if liveUsageByProvider.isEmpty {
+        if usageStore.liveUsageByProvider.isEmpty {
             return ("Manual data", .orange)
         }
         return ("CLI data", .green)
@@ -83,7 +201,7 @@ struct UsagePopover: View {
             .pickerStyle(.segmented)
             .padding([.horizontal, .bottom], 14)
 
-            if let refreshError {
+            if let refreshError = usageStore.refreshError {
                 Text(refreshError)
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -121,10 +239,6 @@ struct UsagePopover: View {
             }
             footer
         }
-        .onAppear(perform: refreshUsage)
-        .onChange(of: providerStore.providers) { _, _ in
-            refreshUsage()
-        }
     }
 
     private var header: some View {
@@ -144,7 +258,7 @@ struct UsagePopover: View {
     private var footer: some View {
         HStack(spacing: 12) {
             Button {
-                refreshUsage()
+                usageStore.pullNow(providers: providerStore.providers)
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
@@ -203,39 +317,6 @@ struct UsagePopover: View {
         .controlSize(.small)
         .padding(12)
         .background(.bar)
-    }
-
-    private func refreshUsage() {
-        guard !isRefreshing else {
-            return
-        }
-
-        isRefreshing = true
-        defer {
-            isRefreshing = false
-        }
-
-        var nextUsage: [String: ProviderLiveUsage] = [:]
-        var messages: [String] = []
-
-        for provider in providerStore.providers where provider.isEnabled {
-            guard provider.id == "codex", provider.dataSource == .localAdapter else {
-                continue
-            }
-
-            do {
-                if let usage = try CodexCliUsageReader().readLatestUsage() {
-                    nextUsage[provider.id] = usage
-                } else {
-                    messages.append("No Codex CLI token_count data found in ~/.codex/sessions.")
-                }
-            } catch {
-                messages.append("Codex CLI data could not be read: \(error.localizedDescription)")
-            }
-        }
-
-        liveUsageByProvider = nextUsage
-        refreshError = messages.isEmpty ? nil : messages.joined(separator: " ")
     }
 }
 
@@ -667,6 +748,15 @@ struct ProviderEditor: View {
                         Text(source.rawValue).tag(source)
                     }
                 }
+                LabeledContent("Pull interval") {
+                    Stepper(
+                        "\(provider.pollIntervalMinutes) min",
+                        value: $provider.pollIntervalMinutes,
+                        in: 1...120,
+                        step: 1
+                    )
+                    .frame(width: 130)
+                }
                 Toggle("Enabled in popover and widget", isOn: $provider.isEnabled)
             }
 
@@ -857,7 +947,55 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
     var dataSource: ProviderDataSource
     var isBuiltIn: Bool
     var isEnabled: Bool
+    var pollIntervalMinutes: Int
     var manualWindows: [ManualUsageWindow]
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case displayName
+        case commandHint
+        case symbolName
+        case dataSource
+        case isBuiltIn
+        case isEnabled
+        case pollIntervalMinutes
+        case manualWindows
+    }
+
+    init(
+        id: String,
+        displayName: String,
+        commandHint: String,
+        symbolName: String,
+        dataSource: ProviderDataSource,
+        isBuiltIn: Bool,
+        isEnabled: Bool,
+        pollIntervalMinutes: Int = 5,
+        manualWindows: [ManualUsageWindow]
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.commandHint = commandHint
+        self.symbolName = symbolName
+        self.dataSource = dataSource
+        self.isBuiltIn = isBuiltIn
+        self.isEnabled = isEnabled
+        self.pollIntervalMinutes = pollIntervalMinutes
+        self.manualWindows = manualWindows
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        commandHint = try container.decode(String.self, forKey: .commandHint)
+        symbolName = try container.decode(String.self, forKey: .symbolName)
+        dataSource = try container.decode(ProviderDataSource.self, forKey: .dataSource)
+        isBuiltIn = try container.decode(Bool.self, forKey: .isBuiltIn)
+        isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
+        pollIntervalMinutes = try container.decodeIfPresent(Int.self, forKey: .pollIntervalMinutes) ?? 5
+        manualWindows = try container.decode([ManualUsageWindow].self, forKey: .manualWindows)
+    }
 
     static func builtIn(
         id: String,
@@ -874,6 +1012,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
             dataSource: dataSource,
             isBuiltIn: true,
             isEnabled: false,
+            pollIntervalMinutes: 5,
             manualWindows: []
         )
     }
@@ -887,6 +1026,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
             dataSource: .manual,
             isBuiltIn: false,
             isEnabled: false,
+            pollIntervalMinutes: 5,
             manualWindows: []
         )
     }

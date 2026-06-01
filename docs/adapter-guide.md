@@ -27,7 +27,8 @@ Implemented:
 
 macOS UI status:
 
-- If the Codex provider is enabled and set to `Local adapter`, the menu-bar popover reads `~/.codex/sessions` directly and displays the latest verified 5-hour/weekly windows from Codex CLI `token_count` events.
+- If the Codex provider is enabled and set to `Local adapter`, the macOS app reads `~/.codex/sessions` directly on the provider's configured pull interval and displays the latest verified 5-hour/weekly windows from Codex CLI `token_count` events.
+- The default pull interval is 5 minutes and can be changed per provider in Settings.
 - If no `token_count` event exists yet, the popover shows a data issue instead of guessing.
 
 Cataloged but not yet parsed:

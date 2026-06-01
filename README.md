@@ -39,7 +39,7 @@ All required tools are present in the catalog:
 
 Only Codex CLI has an implemented local parser in this initial slice because local `token_count` events were verified. Other providers remain manual or adapter-pending until their data source is proven.
 
-On macOS, an enabled Codex provider with data source `Local adapter` reads the latest local Codex CLI `token_count` events from `~/.codex/sessions` when the popover opens or the user clicks Refresh.
+On macOS, an enabled Codex provider with data source `Local adapter` reads the latest local Codex CLI `token_count` events from `~/.codex/sessions` on a configurable provider pull interval. The default interval is 5 minutes. The Refresh button still performs a manual pull.
 
 ## Display Modes
 
