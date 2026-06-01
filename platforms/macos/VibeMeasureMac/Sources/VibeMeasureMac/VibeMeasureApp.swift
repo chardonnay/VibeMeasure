@@ -431,9 +431,21 @@ final class ProviderSettingsStore: ObservableObject {
     }
 
     private let storageKey = "providerSettings.v1"
+    private let storageVersionKey = "providerSettings.version"
+    private static let currentStorageVersion = 2
 
     init() {
-        providers = loadProviders()
+        var loadedProviders = loadProviders()
+        if UserDefaults.standard.integer(forKey: storageVersionKey) < Self.currentStorageVersion {
+            loadedProviders = loadedProviders.map { provider in
+                var migratedProvider = provider
+                migratedProvider.isEnabled = false
+                return migratedProvider
+            }
+            save(loadedProviders)
+            UserDefaults.standard.set(Self.currentStorageVersion, forKey: storageVersionKey)
+        }
+        providers = loadedProviders
     }
 
     func binding(for id: String) -> Binding<ProviderSettings>? {
@@ -485,6 +497,10 @@ final class ProviderSettingsStore: ObservableObject {
     }
 
     private func save() {
+        save(providers)
+    }
+
+    private func save(_ providers: [ProviderSettings]) {
         guard let data = try? JSONEncoder().encode(providers) else {
             return
         }
@@ -549,7 +565,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
             symbolName: symbolName,
             dataSource: dataSource,
             isBuiltIn: true,
-            isEnabled: true,
+            isEnabled: false,
             manualWindows: []
         )
     }
@@ -562,7 +578,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
             symbolName: "terminal",
             dataSource: .manual,
             isBuiltIn: false,
-            isEnabled: true,
+            isEnabled: false,
             manualWindows: []
         )
     }

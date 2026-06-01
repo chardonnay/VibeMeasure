@@ -68,7 +68,7 @@ erDiagram
 - `one_week`
 - `one_month`
 
-Provider cycles are default. The period comparison modes are derived from stored events and do not imply provider-specific limits unless a limit window is verified or manually configured.
+Provider cycles are the default display mode. Built-in LLM providers are disabled in menu-bar and widget surfaces until the user explicitly enables them. The period comparison modes are derived from stored events and do not imply provider-specific limits unless a limit window is verified or manually configured.
 
 ## Window Kinds
 
@@ -78,4 +78,3 @@ Provider cycles are default. The period comparison modes are derived from stored
 - `custom_minutes`
 
 Unknown provider windows are not generated automatically.
-

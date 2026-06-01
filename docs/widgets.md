@@ -2,6 +2,8 @@
 
 Widgets show a compact snapshot of selected provider windows. They must not perform privileged parsing or API calls directly. Native apps or background services write sanitized snapshots; widgets read those snapshots.
 
+All built-in LLM providers are hidden from widgets by default. A provider appears only after the user enables it in Settings.
+
 ## User Configuration
 
 The user can choose what appears in the widget:
@@ -21,4 +23,3 @@ The user can choose what appears in the widget:
 - KDE: Plasma widgets are packaged as plasmoids.
 
 The widget design should remain visually similar across platforms, but each platform uses its native widget API.
-

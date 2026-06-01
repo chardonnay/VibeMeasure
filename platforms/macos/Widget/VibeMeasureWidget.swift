@@ -25,23 +25,38 @@ struct VibeMeasureWidgetView: View {
     let entry: VibeMeasureEntry
 
     var body: some View {
-        HStack(spacing: 14) {
-            ForEach(entry.providers) { provider in
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(provider.name)
-                        .font(.caption.weight(.bold))
-                    HStack {
-                        Text(provider.window)
-                        Spacer()
-                        Text(provider.percent)
-                            .foregroundStyle(.green)
-                            .fontWeight(.bold)
-                    }
-                    ProgressView(value: provider.value)
-                        .tint(.green)
-                    Text(provider.note)
+        Group {
+            if entry.providers.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("VibeMeasure")
+                        .font(.headline)
+                    Text("No providers enabled")
+                        .font(.caption.weight(.semibold))
+                    Text("Open Settings to activate the LLM providers you want shown here.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            } else {
+                HStack(spacing: 14) {
+                    ForEach(entry.providers) { provider in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(provider.name)
+                                .font(.caption.weight(.bold))
+                            HStack {
+                                Text(provider.window)
+                                Spacer()
+                                Text(provider.percent)
+                                    .foregroundStyle(.green)
+                                    .fontWeight(.bold)
+                            }
+                            ProgressView(value: provider.value)
+                                .tint(.green)
+                            Text(provider.note)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
         }
@@ -71,23 +86,5 @@ struct WidgetProviderPreview: Identifiable {
     let value: Double
     let note: String
 
-    static let samples = [
-        WidgetProviderPreview(
-            id: "claude",
-            name: "Claude",
-            window: "5-Hour",
-            percent: "4%",
-            value: 0.04,
-            note: "Manual setup"
-        ),
-        WidgetProviderPreview(
-            id: "codex",
-            name: "Codex",
-            window: "5-Hour",
-            percent: "1%",
-            value: 0.01,
-            note: "Local data"
-        )
-    ]
+    static let samples: [WidgetProviderPreview] = []
 }
-

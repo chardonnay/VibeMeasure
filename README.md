@@ -41,9 +41,9 @@ Only Codex CLI has an implemented local parser in this initial slice because loc
 
 ## Display Modes
 
-The default first-run view is `Provider cycles`.
+The default first-run view is `Provider cycles`, but all built-in LLM providers are disabled for the menu-bar popover and widget until the user explicitly enables them in Settings.
 
-- `Provider cycles`: each provider shows its own verified or manually configured windows, such as 5-hour, weekly, or monthly cycles.
+- `Provider cycles`: each enabled provider shows its own verified or manually configured windows, such as 5-hour, weekly, or monthly cycles.
 - `5 hours`: compares all providers across the last 5 hours.
 - `1 week`: compares all providers across the current UTC week.
 - `1 month`: compares all providers across the current UTC calendar month.
@@ -109,4 +109,3 @@ kpackagetool6 --type Plasma/Applet --install platforms/linux/kde/org.vibemeasure
 ## License
 
 VibeMeasure is released under the [MIT License](LICENSE).
-
