@@ -398,7 +398,7 @@ struct UsagePopover: View {
 
             if let refreshError = usageStore.refreshError {
                 Text(refreshError)
-                    .font(.caption)
+                    .font(.callout)
                     .foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 14)
@@ -413,9 +413,9 @@ struct UsagePopover: View {
                                 .font(.largeTitle)
                                 .foregroundStyle(.secondary)
                             Text("No enabled providers")
-                                .font(.headline)
+                                .font(.title3.weight(.semibold))
                             Text("Open Settings to enable or add providers.")
-                                .font(.caption)
+                                .font(.callout)
                                 .foregroundStyle(.secondary)
                             SettingsLink {
                                 Text("Open Settings")
@@ -441,10 +441,10 @@ struct UsagePopover: View {
             Image(systemName: "chart.bar.fill")
                 .font(.title2)
             Text("Usage Monitor")
-                .font(.headline)
+                .font(.title3.weight(.semibold))
             Spacer()
             Text(statusBadge.label)
-                .font(.caption.weight(.semibold))
+                .font(.callout.weight(.semibold))
                 .foregroundStyle(statusBadge.color)
         }
         .padding(14)
@@ -477,7 +477,7 @@ struct UsagePopover: View {
                 Label("Quit", systemImage: "power")
             }
         }
-        .font(.caption)
+        .font(.callout)
         .labelStyle(.titleAndIcon)
         .controlSize(.small)
         .padding(12)
@@ -492,18 +492,19 @@ struct ProviderSection: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Image(systemName: provider.symbol)
+                    .font(.title3)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(provider.name)
-                        .font(.headline)
+                        .font(.title3.weight(.semibold))
                     if !provider.planName.isEmpty {
                         Text(provider.planName)
-                            .font(.caption)
+                            .font(.callout)
                             .foregroundStyle(.secondary)
                     }
                 }
                 Spacer()
                 Text(provider.status)
-                    .font(.caption.weight(.bold))
+                    .font(.callout.weight(.bold))
                     .foregroundStyle(provider.statusColor)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
@@ -514,15 +515,16 @@ struct ProviderSection: View {
                 VStack(alignment: .leading, spacing: 5) {
                     HStack {
                         Text(window.name)
+                            .font(.body.weight(.semibold))
                         Spacer()
                         Text(window.percentText)
+                            .font(.body.weight(.bold))
                             .foregroundStyle(.green)
-                            .fontWeight(.bold)
                     }
                     ProgressView(value: window.percent)
                         .tint(.green)
                     Text(window.resetText)
-                        .font(.caption)
+                        .font(.callout)
                         .foregroundStyle(.secondary)
                 }
             }
