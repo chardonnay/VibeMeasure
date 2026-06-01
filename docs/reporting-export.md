@@ -11,11 +11,12 @@ Reports summarize token usage and cost status over a selected period.
 
 The CLI already supports custom start and end timestamps. Native UIs will map dropdown selections to these ranges.
 
-macOS status: the menu-bar app opens a native Reports window from the Usage footer. It currently shows the latest live/manual snapshot for enabled providers. Historical native `.xlsx`/`.pdf` export stays disabled until the macOS app writes usage events to the shared SQLite store.
+macOS status: the menu-bar app opens a native Reports window from the Usage footer. It can export the currently visible live/manual snapshot to `.xlsx` and `.pdf`. Historical native aggregation over the selected period starts after the macOS app writes usage events to the shared SQLite store.
 
 ## Exports
 
-- `.xlsx`: generated with `rust_xlsxwriter`.
+- CLI `.xlsx`: generated with `rust_xlsxwriter`.
+- macOS snapshot `.xlsx`: generated as an open OOXML workbook.
 - `.pdf`: generated as a simple open PDF document.
 
 Exports include token counts and source notes. Costs are omitted unless provider-reported cost, verified pricing, or manual pricing exists.

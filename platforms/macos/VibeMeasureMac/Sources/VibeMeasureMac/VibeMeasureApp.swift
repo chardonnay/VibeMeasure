@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 import UserNotifications
 
 private enum UsageWindowMetrics {
@@ -516,6 +517,19 @@ enum ReportPeriod: String, CaseIterable, Identifiable {
     case custom = "Custom"
 
     var id: String { rawValue }
+
+    var fileNameComponent: String {
+        switch self {
+        case .currentWeek:
+            "current-week"
+        case .currentMonth:
+            "current-month"
+        case .currentYear:
+            "current-year"
+        case .custom:
+            "custom"
+        }
+    }
 }
 
 struct ReportsView: View {
@@ -524,6 +538,8 @@ struct ReportsView: View {
     @State private var period = ReportPeriod.currentWeek
     @State private var customStartDate = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
     @State private var customEndDate = Date()
+    @State private var exportStatus: String?
+    @State private var exportError: String?
 
     private var rows: [ReportSnapshotRow] {
         providerStore.providers
@@ -603,6 +619,16 @@ struct ReportsView: View {
             Text("The macOS app currently shows the latest live/manual snapshot. Historical XLSX/PDF export requires persisted SQLite usage events.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let exportStatus {
+                Text(exportStatus)
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            }
+            if let exportError {
+                Text(exportError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
         }
         .padding(16)
     }
@@ -630,19 +656,49 @@ struct ReportsView: View {
 
     private var footer: some View {
         HStack {
-            Text("Exports are disabled until the native app writes historical usage events to SQLite.")
+            Text("Exports contain the current snapshot. Historical aggregation starts after SQLite event persistence is connected.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
-            Button("Export XLSX") {}
-                .disabled(true)
-                .help("Requires persisted SQLite usage events.")
-            Button("Export PDF") {}
-                .disabled(true)
-                .help("Requires persisted SQLite usage events.")
+            Button("Export XLSX") {
+                export(.xlsx)
+            }
+            .disabled(rows.isEmpty)
+            Button("Export PDF") {
+                export(.pdf)
+            }
+            .disabled(rows.isEmpty)
         }
         .padding(16)
         .background(.bar)
+    }
+
+    private func export(_ format: ReportExportFormat) {
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "VibeMeasure-\(period.fileNameComponent).\(format.fileExtension)"
+        if let contentType = UTType(filenameExtension: format.fileExtension) {
+            panel.allowedContentTypes = [contentType]
+        }
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        let report = SnapshotReport(
+            periodLabel: periodLabel,
+            generatedAt: Date(),
+            rows: rows
+        )
+
+        do {
+            try SnapshotReportExporter.write(report, format: format, to: url)
+            exportError = nil
+            exportStatus = "Exported \(url.lastPathComponent)"
+        } catch {
+            exportStatus = nil
+            exportError = error.localizedDescription
+        }
     }
 }
 
@@ -654,6 +710,299 @@ struct ReportSnapshotRow: Identifiable {
     let percentText: String
     let source: String
     let notes: String
+}
+
+enum ReportExportFormat {
+    case xlsx
+    case pdf
+
+    var fileExtension: String {
+        switch self {
+        case .xlsx:
+            "xlsx"
+        case .pdf:
+            "pdf"
+        }
+    }
+}
+
+struct SnapshotReport {
+    let periodLabel: String
+    let generatedAt: Date
+    let rows: [ReportSnapshotRow]
+}
+
+enum ReportExportError: LocalizedError {
+    case zipFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .zipFailed(stderr):
+            "XLSX export failed: \(stderr)"
+        }
+    }
+}
+
+struct SnapshotReportExporter {
+    static func write(_ report: SnapshotReport, format: ReportExportFormat, to url: URL) throws {
+        switch format {
+        case .xlsx:
+            try writeXLSX(report, to: url)
+        case .pdf:
+            try writePDF(report, to: url)
+        }
+    }
+
+    private static func writeXLSX(_ report: SnapshotReport, to url: URL) throws {
+        let fileManager = FileManager.default
+        let temporaryRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("VibeMeasureReport-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
+        defer {
+            try? fileManager.removeItem(at: temporaryRoot)
+        }
+
+        try createDirectory("_rels", in: temporaryRoot)
+        try createDirectory("xl/_rels", in: temporaryRoot)
+        try createDirectory("xl/worksheets", in: temporaryRoot)
+
+        try writeXML(contentTypesXML, to: temporaryRoot.appendingPathComponent("[Content_Types].xml"))
+        try writeXML(rootRelationshipsXML, to: temporaryRoot.appendingPathComponent("_rels/.rels"))
+        try writeXML(workbookXML, to: temporaryRoot.appendingPathComponent("xl/workbook.xml"))
+        try writeXML(workbookRelationshipsXML, to: temporaryRoot.appendingPathComponent("xl/_rels/workbook.xml.rels"))
+        try writeXML(worksheetXML(for: report), to: temporaryRoot.appendingPathComponent("xl/worksheets/sheet1.xml"))
+
+        if fileManager.fileExists(atPath: url.path) {
+            try fileManager.removeItem(at: url)
+        }
+
+        let process = Process()
+        let standardError = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+        process.currentDirectoryURL = temporaryRoot
+        process.arguments = ["-q", "-r", url.path, "."]
+        process.standardError = standardError
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let stderr = String(data: standardError.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+                ?? "zip exited with code \(process.terminationStatus)"
+            throw ReportExportError.zipFailed(stderr)
+        }
+    }
+
+    private static func writePDF(_ report: SnapshotReport, to url: URL) throws {
+        try minimalPDFData(lines: report.pdfLines()).write(to: url, options: .atomic)
+    }
+
+    private static func createDirectory(_ path: String, in root: URL) throws {
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent(path, isDirectory: true),
+            withIntermediateDirectories: true
+        )
+    }
+
+    private static func writeXML(_ xml: String, to url: URL) throws {
+        try Data(xml.utf8).write(to: url, options: .atomic)
+    }
+
+    private static var contentTypesXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+          <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+          <Default Extension="xml" ContentType="application/xml"/>
+          <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+          <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+        </Types>
+        """
+    }
+
+    private static var rootRelationshipsXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+        </Relationships>
+        """
+    }
+
+    private static var workbookXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <sheets>
+            <sheet name="Report" sheetId="1" r:id="rId1"/>
+          </sheets>
+        </workbook>
+        """
+    }
+
+    private static var workbookRelationshipsXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+        </Relationships>
+        """
+    }
+
+    private static func worksheetXML(for report: SnapshotReport) -> String {
+        let rows = report.spreadsheetRows()
+        let sheetRows = rows.enumerated()
+            .map { rowIndex, columns in
+                let rowNumber = rowIndex + 1
+                let cells = columns.enumerated()
+                    .map { columnIndex, value in
+                        let reference = "\(columnName(for: columnIndex))\(rowNumber)"
+                        return #"<c r="\#(reference)" t="inlineStr"><is><t>\#(xmlEscaped(value))</t></is></c>"#
+                    }
+                    .joined()
+                return #"<row r="\#(rowNumber)">\#(cells)</row>"#
+            }
+            .joined()
+
+        return """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <sheetData>\(sheetRows)</sheetData>
+        </worksheet>
+        """
+    }
+
+    private static func minimalPDFData(lines: [String]) -> Data {
+        let pages = lines.chunked(into: 44)
+        var objects: [String] = []
+        objects.append("<< /Type /Catalog /Pages 2 0 R >>\n")
+
+        let pageObjectNumbers = pages.indices.map { 4 + $0 * 2 }
+        let kids = pageObjectNumbers.map { "\($0) 0 R" }.joined(separator: " ")
+        objects.append("<< /Type /Pages /Kids [\(kids)] /Count \(pages.count) >>\n")
+        objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\n")
+
+        for (pageIndex, pageLines) in pages.enumerated() {
+            let pageObjectNumber = 4 + pageIndex * 2
+            let contentObjectNumber = pageObjectNumber + 1
+            let stream = pdfStream(for: pageLines)
+            objects.append(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents \(contentObjectNumber) 0 R >>\n"
+            )
+            objects.append("<< /Length \(stream.utf8.count) >>\nstream\n\(stream)endstream\n")
+        }
+
+        var pdf = "%PDF-1.4\n"
+        var offsets: [Int] = []
+        for (index, object) in objects.enumerated() {
+            offsets.append(pdf.utf8.count)
+            pdf += "\(index + 1) 0 obj\n\(object)endobj\n"
+        }
+
+        let xrefStart = pdf.utf8.count
+        pdf += "xref\n0 \(objects.count + 1)\n0000000000 65535 f \n"
+        for offset in offsets {
+            pdf += String(format: "%010d 00000 n \n", offset)
+        }
+        pdf += "trailer\n<< /Size \(objects.count + 1) /Root 1 0 R >>\nstartxref\n\(xrefStart)\n%%EOF\n"
+        return Data(pdf.utf8)
+    }
+
+    private static func pdfStream(for lines: [String]) -> String {
+        let escapedLines = lines
+            .flatMap { line in line.wrapped(maxLength: 98) }
+            .map { "(\(pdfEscaped($0))) Tj\n0 -15 Td" }
+            .joined(separator: "\n")
+        return "BT\n/F1 10 Tf\n48 760 Td\n\(escapedLines)\nET\n"
+    }
+
+    private static func columnName(for index: Int) -> String {
+        let scalars = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        if index < scalars.count {
+            return String(scalars[index])
+        }
+        return "A\(String(scalars[index % scalars.count]))"
+    }
+
+    private static func xmlEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
+    }
+
+    private static func pdfEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "(", with: "\\(")
+            .replacingOccurrences(of: ")", with: "\\)")
+    }
+}
+
+private extension SnapshotReport {
+    func spreadsheetRows() -> [[String]] {
+        [
+            ["VibeMeasure Report"],
+            ["Generated", generatedAt.formatted(date: .abbreviated, time: .standard)],
+            ["Period", periodLabel],
+            ["Scope", "Latest snapshot export. Historical aggregation starts after SQLite event persistence is connected."],
+            [],
+            ["Provider", "Plan", "Window", "Usage", "Source", "Notes"]
+        ] + rows.map { row in
+            [row.providerName, row.planName, row.windowName, row.percentText, row.source, row.notes]
+        }
+    }
+
+    func pdfLines() -> [String] {
+        var lines = [
+            "VibeMeasure Report",
+            "Generated: \(generatedAt.formatted(date: .abbreviated, time: .standard))",
+            "Period: \(periodLabel)",
+            "Scope: Latest snapshot export. Historical aggregation starts after SQLite event persistence is connected.",
+            "",
+            "Provider | Plan | Window | Usage | Source | Notes"
+        ]
+
+        lines += rows.map { row in
+            "\(row.providerName) | \(row.planName) | \(row.windowName) | \(row.percentText) | \(row.source) | \(row.notes)"
+        }
+        return lines
+    }
+}
+
+private extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        stride(from: 0, to: count, by: size).map { index in
+            Array(self[index..<Swift.min(index + size, count)])
+        }
+    }
+}
+
+private extension String {
+    func wrapped(maxLength: Int) -> [String] {
+        guard count > maxLength else {
+            return [self]
+        }
+
+        var lines: [String] = []
+        var currentLine = ""
+        for word in split(separator: " ") {
+            let next = currentLine.isEmpty ? String(word) : "\(currentLine) \(word)"
+            if next.count > maxLength {
+                if !currentLine.isEmpty {
+                    lines.append(currentLine)
+                }
+                currentLine = String(word)
+            } else {
+                currentLine = next
+            }
+        }
+        if !currentLine.isEmpty {
+            lines.append(currentLine)
+        }
+        return lines.isEmpty ? [self] : lines
+    }
 }
 
 struct SettingsView: View {
