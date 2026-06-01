@@ -24,18 +24,23 @@ sequenceDiagram
 Implemented:
 
 - `codex`: parses verified local Codex CLI `token_count` JSONL events.
+- `minimax`: runs the official MiniMax CLI command `mmx quota show --output json` and maps the returned current-interval and weekly quota values into live windows.
 
 macOS UI status:
 
 - If the Codex provider is enabled and set to `Local adapter`, the macOS app reads `~/.codex/sessions` directly on the provider's configured pull interval and displays the latest verified 5-hour/weekly windows from Codex CLI `token_count` events.
+- If the MiniMAX provider is enabled and set to `Local adapter`, the macOS app runs `mmx quota show --output json` on the provider's configured pull interval and displays the current-interval and weekly windows reported by the CLI.
 - The default pull interval is 5 minutes and can be changed per provider in Settings.
 - If no `token_count` event exists yet, the popover shows a data issue instead of guessing.
+- If `mmx` is not installed, not authenticated, or returns a non-success response, the popover shows a data issue instead of guessing.
 
 Cataloged but not yet parsed:
 
-- Claude Code, Devin for Terminal, Gemini CLI, OpenCode, Hermes, Kimi CLI, Cursor Agent, Qwen Code, Qoder CLI, GitHub Copilot CLI, Pi, Kiro CLI, Kilo, Mistral Vibe CLI, DeepSeek TUI, MiniMAX.
+- Claude Code, Devin for Terminal, Gemini CLI, OpenCode, Hermes, Kimi CLI, Cursor Agent, Qwen Code, Qoder CLI, GitHub Copilot CLI, Pi, Kiro CLI, Kilo, Mistral Vibe CLI, DeepSeek TUI.
 
 These remain manual or adapter-pending until a local format or official API is verified.
+
+Cursor Agent note: the local `~/.cursor/ai-tracking/ai-code-tracking.db` schema observed during validation contains AI-code tracking tables, not current token or quota usage. The Cursor CLI help and official CLI docs do not currently document a local quota command. Cursor remains adapter-pending until a verified source is available.
 
 ## Test Double Rule
 

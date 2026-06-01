@@ -110,7 +110,7 @@ final class UsageRefreshStore: ObservableObject {
     private func synchronizeConfiguredProviders(_ providers: [ProviderSettings]) {
         self.providers = providers
 
-        let liveProviderIDs = Set(providers.filter(supportsLiveUsage).map(\.id))
+        let liveProviderIDs = Set(providers.filter(\.canReadLiveUsage).map(\.id))
         liveUsageByProvider = liveUsageByProvider.filter { liveProviderIDs.contains($0.key) }
         lastPulledAtByProvider = lastPulledAtByProvider.filter { liveProviderIDs.contains($0.key) }
         errorsByProvider = errorsByProvider.filter { liveProviderIDs.contains($0.key) }
@@ -141,7 +141,7 @@ final class UsageRefreshStore: ObservableObject {
     }
 
     private func shouldPull(provider: ProviderSettings, now: Date, force: Bool) -> Bool {
-        guard supportsLiveUsage(provider) else {
+        guard provider.canReadLiveUsage else {
             return false
         }
 
@@ -153,15 +153,9 @@ final class UsageRefreshStore: ObservableObject {
         return now.timeIntervalSince(lastPulledAtByProvider[provider.id] ?? .distantPast) >= interval
     }
 
-    private func supportsLiveUsage(_ provider: ProviderSettings) -> Bool {
-        provider.isEnabled
-            && provider.id == "codex"
-            && provider.dataSource == .localAdapter
-    }
-
     private func pull(provider: ProviderSettings, now: Date) {
         do {
-            if let usage = try CodexCliUsageReader().readLatestUsage() {
+            if let usage = try readUsage(for: provider) {
                 liveUsageByProvider[provider.id] = usage
                 errorsByProvider.removeValue(forKey: provider.id)
             } else {
@@ -173,6 +167,17 @@ final class UsageRefreshStore: ObservableObject {
             liveUsageByProvider.removeValue(forKey: provider.id)
             errorsByProvider[provider.id] = "Codex CLI data could not be read: \(error.localizedDescription)"
             lastPulledAtByProvider[provider.id] = now
+        }
+    }
+
+    private func readUsage(for provider: ProviderSettings) throws -> ProviderLiveUsage? {
+        switch provider.id {
+        case "codex":
+            try CodexCliUsageReader().readLatestUsage()
+        case "minimax":
+            try MiniMaxCliUsageReader(commandHint: provider.commandHint).readLatestUsage()
+        default:
+            nil
         }
     }
 
@@ -457,6 +462,16 @@ struct ProviderPreview: Identifiable {
             status = liveUsage.status
             statusColor = liveUsage.statusColor
             windows = liveUsage.windows
+        } else if settings.dataSource == .localAdapter && !settings.hasVerifiedLocalAdapter {
+            status = "Adapter pending"
+            statusColor = .orange
+            windows = [
+                WindowPreview(
+                    name: "Adapter pending",
+                    percent: 0,
+                    resetText: "No verified local usage source is implemented for \(settings.displayName)"
+                )
+            ]
         } else {
             status = settings.dataSource.shortLabel
             statusColor = settings.dataSource.color
@@ -768,6 +783,225 @@ struct CodexRateLimitWindow: Decodable {
     }
 }
 
+struct MiniMaxCliUsageReader {
+    let commandHint: String
+
+    func readLatestUsage() throws -> ProviderLiveUsage? {
+        let output = try runQuotaCommand()
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+
+        let response = try decoder.decode(MiniMaxQuotaResponse.self, from: output)
+        guard response.baseResp.statusCode == 0 else {
+            throw LocalUsageReaderError.invalidResponse(response.baseResp.statusMsg)
+        }
+
+        let windows = response.modelRemains.flatMap(\.windows)
+        guard !windows.isEmpty else {
+            return nil
+        }
+
+        return ProviderLiveUsage(
+            status: "Local",
+            statusColor: .green,
+            windows: windows
+        )
+    }
+
+    private func runQuotaCommand() throws -> Data {
+        let command = commandHint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let process = Process()
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        let quotaArguments = ["quota", "show", "--output", "json", "--quiet", "--non-interactive"]
+
+        if let executableURL = executableURL(for: command) {
+            process.executableURL = executableURL
+            process.arguments = quotaArguments
+        } else {
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = [(command.isEmpty ? "mmx" : command)] + quotaArguments
+        }
+
+        process.standardOutput = standardOutput
+        process.standardError = standardError
+
+        try process.run()
+        process.waitUntilExit()
+
+        let outputData = standardOutput.fileHandleForReading.readDataToEndOfFile()
+        if process.terminationStatus == 0 {
+            return outputData
+        }
+
+        let errorData = standardError.fileHandleForReading.readDataToEndOfFile()
+        let errorText = Self.redactedSecretText(
+            String(data: errorData, encoding: .utf8) ?? "No stderr output"
+        )
+        throw LocalUsageReaderError.commandFailed(
+            command: "mmx quota show",
+            status: Int(process.terminationStatus),
+            stderr: errorText
+        )
+    }
+
+    private func executableURL(for command: String) -> URL? {
+        let fileManager = FileManager.default
+        if command.hasPrefix("/"), fileManager.isExecutableFile(atPath: command) {
+            return URL(fileURLWithPath: command)
+        }
+
+        for path in ["/opt/homebrew/bin/mmx", "/usr/local/bin/mmx"] where fileManager.isExecutableFile(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+
+        return nil
+    }
+
+    private static func redactedSecretText(_ text: String) -> String {
+        text.replacingOccurrences(
+            of: #"sk-[A-Za-z0-9_-]+"#,
+            with: "sk-[redacted]",
+            options: .regularExpression
+        )
+    }
+}
+
+enum LocalUsageReaderError: LocalizedError {
+    case commandFailed(command: String, status: Int, stderr: String)
+    case invalidResponse(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .commandFailed(command, status, stderr):
+            "\(command) failed with exit code \(status): \(stderr)"
+        case let .invalidResponse(message):
+            "Unexpected usage response: \(message)"
+        }
+    }
+}
+
+struct MiniMaxQuotaResponse: Decodable {
+    let modelRemains: [MiniMaxModelRemain]
+    let baseResp: MiniMaxBaseResponse
+}
+
+struct MiniMaxBaseResponse: Decodable {
+    let statusCode: Int
+    let statusMsg: String
+}
+
+struct MiniMaxModelRemain: Decodable {
+    let startTime: Int64
+    let endTime: Int64
+    let remainsTime: Int64
+    let currentIntervalTotalCount: Int
+    let currentIntervalUsageCount: Int
+    let modelName: String
+    let currentWeeklyTotalCount: Int
+    let currentWeeklyUsageCount: Int
+    let weeklyStartTime: Int64
+    let weeklyEndTime: Int64
+    let weeklyRemainsTime: Int64
+    let currentIntervalRemainingPercent: Double
+    let currentWeeklyRemainingPercent: Double
+
+    var windows: [WindowPreview] {
+        [
+            WindowPreview(
+                name: "\(modelLabel) 5-Hour",
+                percent: Self.usedPercent(
+                    usageCount: currentIntervalUsageCount,
+                    totalCount: currentIntervalTotalCount,
+                    remainingPercent: currentIntervalRemainingPercent
+                ),
+                resetText: Self.resetText(
+                    remainingMilliseconds: remainsTime,
+                    endMilliseconds: endTime,
+                    usageCount: currentIntervalUsageCount,
+                    totalCount: currentIntervalTotalCount,
+                    remainingPercent: currentIntervalRemainingPercent
+                ),
+                displayModes: [.fiveHours]
+            ),
+            WindowPreview(
+                name: "\(modelLabel) 1 Week",
+                percent: Self.usedPercent(
+                    usageCount: currentWeeklyUsageCount,
+                    totalCount: currentWeeklyTotalCount,
+                    remainingPercent: currentWeeklyRemainingPercent
+                ),
+                resetText: Self.resetText(
+                    remainingMilliseconds: weeklyRemainsTime,
+                    endMilliseconds: weeklyEndTime,
+                    usageCount: currentWeeklyUsageCount,
+                    totalCount: currentWeeklyTotalCount,
+                    remainingPercent: currentWeeklyRemainingPercent
+                ),
+                displayModes: [.oneWeek]
+            )
+        ]
+    }
+
+    private var modelLabel: String {
+        modelName.isEmpty ? "MiniMAX" : modelName
+    }
+
+    private static func usedPercent(usageCount: Int, totalCount: Int, remainingPercent: Double) -> Double {
+        if totalCount > 0 {
+            return min(max(Double(usageCount) / Double(totalCount), 0), 1)
+        }
+
+        return min(max(1 - remainingPercent / 100, 0), 1)
+    }
+
+    private static func resetText(
+        remainingMilliseconds: Int64,
+        endMilliseconds: Int64,
+        usageCount: Int,
+        totalCount: Int,
+        remainingPercent: Double
+    ) -> String {
+        let resetPrefix = resetPrefix(
+            remainingMilliseconds: remainingMilliseconds,
+            endMilliseconds: endMilliseconds
+        )
+
+        if totalCount > 0 {
+            return "\(resetPrefix); \(usageCount)/\(totalCount) used"
+        }
+
+        return "\(resetPrefix); remaining \(Int(remainingPercent))%"
+    }
+
+    private static func resetPrefix(remainingMilliseconds: Int64, endMilliseconds: Int64) -> String {
+        if remainingMilliseconds > 0 {
+            return "Resets in \(durationText(seconds: remainingMilliseconds / 1_000))"
+        }
+
+        let endDate = Date(timeIntervalSince1970: TimeInterval(endMilliseconds) / 1_000)
+        let remainingSeconds = Int(endDate.timeIntervalSince(Date()))
+        guard remainingSeconds > 0 else {
+            return "Reset time passed; refresh MiniMAX"
+        }
+        return "Resets in \(durationText(seconds: Int64(remainingSeconds)))"
+    }
+
+    private static func durationText(seconds: Int64) -> String {
+        let days = seconds / 86_400
+        let hours = (seconds % 86_400) / 3_600
+        let minutes = (seconds % 3_600) / 60
+
+        if days > 0 {
+            return "\(days)d \(hours)h"
+        }
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        }
+        return "\(max(minutes, 1))m"
+    }
+}
+
 struct ProviderListRow: View {
     let provider: ProviderSettings
 
@@ -892,16 +1126,22 @@ final class ProviderSettingsStore: ObservableObject {
 
     private let storageKey = "providerSettings.v1"
     private let storageVersionKey = "providerSettings.version"
-    private static let currentStorageVersion = 2
+    private static let currentStorageVersion = 3
 
     init() {
         var loadedProviders = loadProviders()
-        if UserDefaults.standard.integer(forKey: storageVersionKey) < Self.currentStorageVersion {
+        let storedVersion = UserDefaults.standard.integer(forKey: storageVersionKey)
+        if storedVersion < 2 {
             loadedProviders = loadedProviders.map { provider in
                 var migratedProvider = provider
                 migratedProvider.isEnabled = false
                 return migratedProvider
             }
+        }
+        if storedVersion < 3 {
+            loadedProviders = Self.providersWithMiniMaxAdapterDefaults(loadedProviders)
+        }
+        if storedVersion < Self.currentStorageVersion {
             save(loadedProviders)
             UserDefaults.standard.set(Self.currentStorageVersion, forKey: storageVersionKey)
         }
@@ -997,8 +1237,25 @@ final class ProviderSettingsStore: ObservableObject {
         .builtIn(id: "kilo", displayName: "Kilo", commandHint: "", symbolName: "k.square"),
         .builtIn(id: "mistral-vibe-cli", displayName: "Mistral Vibe CLI", commandHint: "", symbolName: "wind"),
         .builtIn(id: "deepseek-tui", displayName: "DeepSeek TUI", commandHint: "", symbolName: "magnifyingglass"),
-        .builtIn(id: "minimax", displayName: "MiniMAX", commandHint: "", symbolName: "m.square")
+        .builtIn(id: "minimax", displayName: "MiniMAX", commandHint: "mmx", symbolName: "m.square", dataSource: .localAdapter)
     ]
+
+    private static func providersWithMiniMaxAdapterDefaults(_ providers: [ProviderSettings]) -> [ProviderSettings] {
+        providers.map { provider in
+            guard provider.id == "minimax" else {
+                return provider
+            }
+
+            var migratedProvider = provider
+            if migratedProvider.commandHint.isEmpty {
+                migratedProvider.commandHint = "mmx"
+            }
+            if migratedProvider.dataSource == .manual, migratedProvider.manualWindows.isEmpty {
+                migratedProvider.dataSource = .localAdapter
+            }
+            return migratedProvider
+        }
+    }
 }
 
 struct ProviderSettings: Codable, Identifiable, Equatable {
@@ -1091,6 +1348,14 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
             pollIntervalMinutes: 5,
             manualWindows: []
         )
+    }
+
+    var hasVerifiedLocalAdapter: Bool {
+        id == "codex" || id == "minimax"
+    }
+
+    var canReadLiveUsage: Bool {
+        isEnabled && dataSource == .localAdapter && hasVerifiedLocalAdapter
     }
 }
 
