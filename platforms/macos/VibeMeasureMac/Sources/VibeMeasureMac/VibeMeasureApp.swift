@@ -233,14 +233,24 @@ final class UsageRefreshStore: ObservableObject {
 
     private var providers: [ProviderSettings] = []
     private var errorsByProvider: [String: String] = [:]
-    private var timer: Timer?
+    private var pollingTask: Task<Void, Never>?
+    private var pendingRefresh = false
+    private var pendingForcedRefresh = false
 
     init() {
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+        pollingTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard !Task.isCancelled else {
+                    return
+                }
                 self?.pullDueProviders()
             }
         }
+    }
+
+    deinit {
+        pollingTask?.cancel()
     }
 
     func configure(providers: [ProviderSettings]) {
@@ -264,7 +274,9 @@ final class UsageRefreshStore: ObservableObject {
     }
 
     private func pullDueProviders(force: Bool = false, now: Date = Date()) {
-        guard !isRefreshing else {
+        if isRefreshing {
+            pendingRefresh = true
+            pendingForcedRefresh = pendingForcedRefresh || force
             return
         }
 
@@ -276,14 +288,18 @@ final class UsageRefreshStore: ObservableObject {
         }
 
         isRefreshing = true
-        defer {
-            isRefreshing = false
-        }
-
         for provider in dueProviders {
             pull(provider: provider, now: now)
         }
+        isRefreshing = false
         updateRefreshError()
+
+        if pendingRefresh {
+            let shouldForce = pendingForcedRefresh
+            pendingRefresh = false
+            pendingForcedRefresh = false
+            pullDueProviders(force: shouldForce, now: Date())
+        }
     }
 
     private func shouldPull(provider: ProviderSettings, now: Date, force: Bool) -> Bool {
@@ -1417,10 +1433,13 @@ struct WindowPreview: Identifiable {
         displayModes = window.kind.displayModes
     }
 
-    init(codexWindow: CodexRateLimitWindow) {
+    init(codexWindow: CodexRateLimitWindow, now: Date = Date()) {
+        let resetsAt = Date(timeIntervalSince1970: codexWindow.resetsAt)
+        let hasReset = resetsAt <= now
+
         name = Self.codexWindowName(minutes: codexWindow.windowMinutes)
-        percent = min(max(codexWindow.usedPercent / 100, 0), 1)
-        resetText = Self.codexResetText(resetsAt: Date(timeIntervalSince1970: codexWindow.resetsAt))
+        percent = hasReset ? 0 : min(max(codexWindow.usedPercent / 100, 0), 1)
+        resetText = Self.codexResetText(resetsAt: resetsAt, relativeTo: now)
         displayModes = Self.codexDisplayModes(minutes: codexWindow.windowMinutes)
     }
 
@@ -1463,10 +1482,14 @@ struct WindowPreview: Identifiable {
         }
     }
 
-    static func resetText(resetsAt: Date) -> String {
-        let remainingSeconds = Int(resetsAt.timeIntervalSince(Date()))
+    static func resetText(
+        resetsAt: Date,
+        relativeTo now: Date = Date(),
+        expiredText: String = "Window reset; waiting for fresh provider data"
+    ) -> String {
+        let remainingSeconds = Int(resetsAt.timeIntervalSince(now))
         guard remainingSeconds > 0 else {
-            return "Reset time passed; refresh provider"
+            return expiredText
         }
 
         let days = remainingSeconds / 86_400
@@ -1482,8 +1505,12 @@ struct WindowPreview: Identifiable {
         return "Resets in \(max(minutes, 1))m"
     }
 
-    private static func codexResetText(resetsAt: Date) -> String {
-        resetText(resetsAt: resetsAt)
+    private static func codexResetText(resetsAt: Date, relativeTo now: Date) -> String {
+        resetText(
+            resetsAt: resetsAt,
+            relativeTo: now,
+            expiredText: "Window reset; waiting for next Codex CLI event"
+        )
     }
 }
 
@@ -1800,9 +1827,13 @@ struct CodexRateLimits: Decodable {
     let secondary: CodexRateLimitWindow?
 
     var windows: [WindowPreview] {
+        windows(relativeTo: Date())
+    }
+
+    func windows(relativeTo now: Date) -> [WindowPreview] {
         [primary, secondary]
             .compactMap(\.self)
-            .map(WindowPreview.init(codexWindow:))
+            .map { WindowPreview(codexWindow: $0, now: now) }
     }
 }
 

@@ -13,7 +13,11 @@ let package = Package(
         .executableTarget(
             name: "VibeMeasureMac",
             path: "VibeMeasureMac/Sources/VibeMeasureMac"
+        ),
+        .testTarget(
+            name: "VibeMeasureMacTests",
+            dependencies: ["VibeMeasureMac"],
+            path: "VibeMeasureMac/Tests/VibeMeasureMacTests"
         )
     ]
 )
-
