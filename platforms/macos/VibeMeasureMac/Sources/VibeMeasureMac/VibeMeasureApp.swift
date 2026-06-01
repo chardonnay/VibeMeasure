@@ -1156,7 +1156,7 @@ final class ProviderSettingsStore: ObservableObject {
 
     private let storageKey = "providerSettings.v1"
     private let storageVersionKey = "providerSettings.version"
-    private static let currentStorageVersion = 3
+    private static let currentStorageVersion = 4
 
     init() {
         var loadedProviders = loadProviders()
@@ -1168,7 +1168,7 @@ final class ProviderSettingsStore: ObservableObject {
                 return migratedProvider
             }
         }
-        if storedVersion < 3 {
+        if storedVersion < 4 {
             loadedProviders = Self.providersWithMiniMaxAdapterDefaults(loadedProviders)
         }
         if storedVersion < Self.currentStorageVersion {
@@ -1267,7 +1267,14 @@ final class ProviderSettingsStore: ObservableObject {
         .builtIn(id: "kilo", displayName: "Kilo", commandHint: "", symbolName: "k.square"),
         .builtIn(id: "mistral-vibe-cli", displayName: "Mistral Vibe CLI", commandHint: "", symbolName: "wind"),
         .builtIn(id: "deepseek-tui", displayName: "DeepSeek TUI", commandHint: "", symbolName: "magnifyingglass"),
-        .builtIn(id: "minimax", displayName: "MiniMAX", commandHint: "mmx", symbolName: "m.square", dataSource: .localAdapter)
+        .builtIn(
+            id: "minimax",
+            displayName: "MiniMAX",
+            planName: "Token Plan",
+            commandHint: "mmx",
+            symbolName: "m.square",
+            dataSource: .localAdapter
+        )
     ]
 
     private static func providersWithMiniMaxAdapterDefaults(_ providers: [ProviderSettings]) -> [ProviderSettings] {
@@ -1277,6 +1284,9 @@ final class ProviderSettingsStore: ObservableObject {
             }
 
             var migratedProvider = provider
+            if migratedProvider.planName.isEmpty {
+                migratedProvider.planName = "Token Plan"
+            }
             if migratedProvider.commandHint.isEmpty {
                 migratedProvider.commandHint = "mmx"
             }
@@ -1354,6 +1364,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
     static func builtIn(
         id: String,
         displayName: String,
+        planName: String = "",
         commandHint: String,
         symbolName: String,
         dataSource: ProviderDataSource = .manual
@@ -1361,6 +1372,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
         ProviderSettings(
             id: id,
             displayName: displayName,
+            planName: planName,
             commandHint: commandHint,
             symbolName: symbolName,
             dataSource: dataSource,
