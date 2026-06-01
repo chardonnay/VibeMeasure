@@ -15,7 +15,7 @@ struct VibeMeasureApp: App {
                 ),
                 launchAtLogin: $launchAtLogin
             )
-            .frame(width: 360)
+            .frame(width: 460, height: 620)
         }
         .menuBarExtraStyle(.window)
 
@@ -79,17 +79,35 @@ struct UsagePopover: View {
     }
 
     private var footer: some View {
-        HStack {
-            Button("Refresh") {}
+        HStack(spacing: 12) {
+            Button {} label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
+
+            Button {} label: {
+                Label("Reports", systemImage: "doc.text.magnifyingglass")
+            }
+
+            SettingsLink {
+                Label("Settings", systemImage: "gearshape")
+            }
+
             Spacer()
+
             Toggle("Launch at Login", isOn: $launchAtLogin)
                 .toggleStyle(.switch)
+
             Spacer()
-            Button("Quit") {
+
+            Button {
                 NSApplication.shared.terminate(nil)
+            } label: {
+                Label("Quit", systemImage: "power")
             }
         }
         .font(.caption)
+        .labelStyle(.titleAndIcon)
+        .controlSize(.small)
         .padding(12)
         .background(.bar)
     }
@@ -149,7 +167,8 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
         }
         .padding()
-        .frame(width: 440)
+        .frame(width: 560)
+        .frame(minHeight: 320)
     }
 }
 
@@ -206,4 +225,3 @@ struct WindowPreview: Identifiable {
         "\(Int(percent * 100))%"
     }
 }
-
