@@ -41,6 +41,19 @@ enum DisplayMode: String, CaseIterable, Identifiable {
     case oneMonth = "1 month"
 
     var id: String { rawValue }
+
+    var windowTitle: String {
+        switch self {
+        case .providerCycles:
+            "Provider cycles"
+        case .fiveHours:
+            "5-Hour"
+        case .oneWeek:
+            "1 Week"
+        case .oneMonth:
+            "1 Month"
+        }
+    }
 }
 
 @MainActor
@@ -182,7 +195,11 @@ struct UsagePopover: View {
         providerStore.providers
             .filter(\.isEnabled)
             .map { provider in
-                ProviderPreview(settings: provider, liveUsage: usageStore.liveUsageByProvider[provider.id])
+                ProviderPreview(
+                    settings: provider,
+                    liveUsage: usageStore.liveUsageByProvider[provider.id]
+                )
+                .applying(displayMode: displayMode)
             }
     }
 
@@ -484,6 +501,43 @@ struct ProviderPreview: Identifiable {
                 : settings.manualWindows.map(WindowPreview.init(window:))
         }
     }
+
+    private init(
+        id: String,
+        name: String,
+        symbol: String,
+        status: String,
+        statusColor: Color,
+        windows: [WindowPreview]
+    ) {
+        self.id = id
+        self.name = name
+        self.symbol = symbol
+        self.status = status
+        self.statusColor = statusColor
+        self.windows = windows
+    }
+
+    func applying(displayMode: DisplayMode) -> ProviderPreview {
+        guard displayMode != .providerCycles else {
+            return self
+        }
+
+        let matchingWindows = windows.filter { window in
+            window.matches(displayMode: displayMode)
+        }
+
+        return ProviderPreview(
+            id: id,
+            name: name,
+            symbol: symbol,
+            status: status,
+            statusColor: statusColor,
+            windows: matchingWindows.isEmpty
+                ? [WindowPreview.manualSetupRequired(for: displayMode)]
+                : matchingWindows
+        )
+    }
 }
 
 struct WindowPreview: Identifiable {
@@ -491,27 +545,49 @@ struct WindowPreview: Identifiable {
     let name: String
     let percent: Double
     let resetText: String
+    let displayModes: Set<DisplayMode>
 
     var percentText: String {
         "\(Int(percent * 100))%"
     }
 
-    init(name: String, percent: Double, resetText: String) {
+    init(
+        name: String,
+        percent: Double,
+        resetText: String,
+        displayModes: Set<DisplayMode> = []
+    ) {
         self.name = name
         self.percent = percent
         self.resetText = resetText
+        self.displayModes = displayModes
     }
 
     init(window: ManualUsageWindow) {
         name = window.label.isEmpty ? window.kind.rawValue : window.label
         percent = min(max(window.usedPercent / 100, 0), 1)
         resetText = window.resetNote.isEmpty ? "Manual window" : window.resetNote
+        displayModes = window.kind.displayModes
     }
 
     init(codexWindow: CodexRateLimitWindow) {
         name = Self.codexWindowName(minutes: codexWindow.windowMinutes)
         percent = min(max(codexWindow.usedPercent / 100, 0), 1)
         resetText = Self.codexResetText(resetsAt: Date(timeIntervalSince1970: codexWindow.resetsAt))
+        displayModes = Self.codexDisplayModes(minutes: codexWindow.windowMinutes)
+    }
+
+    func matches(displayMode: DisplayMode) -> Bool {
+        displayModes.contains(displayMode)
+    }
+
+    static func manualSetupRequired(for displayMode: DisplayMode) -> WindowPreview {
+        WindowPreview(
+            name: displayMode.windowTitle,
+            percent: 0,
+            resetText: "Manual setup required for this period",
+            displayModes: [displayMode]
+        )
     }
 
     private static func codexWindowName(minutes: Int) -> String {
@@ -524,6 +600,19 @@ struct WindowPreview: Identifiable {
             "1 Month"
         default:
             "\(minutes) min"
+        }
+    }
+
+    private static func codexDisplayModes(minutes: Int) -> Set<DisplayMode> {
+        switch minutes {
+        case 300:
+            [.fiveHours]
+        case 10_080:
+            [.oneWeek]
+        case 40_320...44_640:
+            [.oneMonth]
+        default:
+            []
         }
     }
 
@@ -1058,6 +1147,19 @@ enum UsageWindowKind: String, Codable, CaseIterable, Identifiable {
     case custom = "Custom"
 
     var id: String { rawValue }
+
+    var displayModes: Set<DisplayMode> {
+        switch self {
+        case .fiveHours:
+            [.fiveHours]
+        case .oneWeek:
+            [.oneWeek]
+        case .oneMonth:
+            [.oneMonth]
+        case .custom:
+            []
+        }
+    }
 }
 
 enum ProviderDataSource: String, Codable, CaseIterable, Identifiable {
