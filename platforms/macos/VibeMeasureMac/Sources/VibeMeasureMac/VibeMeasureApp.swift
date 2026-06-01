@@ -1,4 +1,5 @@
 import Combine
+import Foundation
 import SwiftUI
 import UserNotifications
 
@@ -46,11 +47,29 @@ struct UsagePopover: View {
     @Binding var launchAtLogin: Bool
     @ObservedObject var providerStore: ProviderSettingsStore
     @State private var showsLaunchAtLoginTooltip = false
+    @State private var liveUsageByProvider: [String: ProviderLiveUsage] = [:]
+    @State private var refreshError: String?
+    @State private var isRefreshing = false
 
     private var providers: [ProviderPreview] {
         providerStore.providers
             .filter(\.isEnabled)
-            .map(ProviderPreview.init(settings:))
+            .map { provider in
+                ProviderPreview(settings: provider, liveUsage: liveUsageByProvider[provider.id])
+            }
+    }
+
+    private var statusBadge: (label: String, color: Color) {
+        if refreshError != nil {
+            return ("Data issue", .red)
+        }
+        if isRefreshing {
+            return ("Refreshing", .blue)
+        }
+        if liveUsageByProvider.isEmpty {
+            return ("Manual data", .orange)
+        }
+        return ("CLI data", .green)
     }
 
     var body: some View {
@@ -63,6 +82,15 @@ struct UsagePopover: View {
             }
             .pickerStyle(.segmented)
             .padding([.horizontal, .bottom], 14)
+
+            if let refreshError {
+                Text(refreshError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 10)
+            }
 
             ScrollView {
                 VStack(spacing: 16) {
@@ -93,6 +121,10 @@ struct UsagePopover: View {
             }
             footer
         }
+        .onAppear(perform: refreshUsage)
+        .onChange(of: providerStore.providers) { _, _ in
+            refreshUsage()
+        }
     }
 
     private var header: some View {
@@ -102,16 +134,18 @@ struct UsagePopover: View {
             Text("Usage Monitor")
                 .font(.headline)
             Spacer()
-            Text("Manual data")
+            Text(statusBadge.label)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.orange)
+                .foregroundStyle(statusBadge.color)
         }
         .padding(14)
     }
 
     private var footer: some View {
         HStack(spacing: 12) {
-            Button {} label: {
+            Button {
+                refreshUsage()
+            } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
 
@@ -169,6 +203,39 @@ struct UsagePopover: View {
         .controlSize(.small)
         .padding(12)
         .background(.bar)
+    }
+
+    private func refreshUsage() {
+        guard !isRefreshing else {
+            return
+        }
+
+        isRefreshing = true
+        defer {
+            isRefreshing = false
+        }
+
+        var nextUsage: [String: ProviderLiveUsage] = [:]
+        var messages: [String] = []
+
+        for provider in providerStore.providers where provider.isEnabled {
+            guard provider.id == "codex", provider.dataSource == .localAdapter else {
+                continue
+            }
+
+            do {
+                if let usage = try CodexCliUsageReader().readLatestUsage() {
+                    nextUsage[provider.id] = usage
+                } else {
+                    messages.append("No Codex CLI token_count data found in ~/.codex/sessions.")
+                }
+            } catch {
+                messages.append("Codex CLI data could not be read: \(error.localizedDescription)")
+            }
+        }
+
+        liveUsageByProvider = nextUsage
+        refreshError = messages.isEmpty ? nil : messages.joined(separator: " ")
     }
 }
 
@@ -311,15 +378,21 @@ struct ProviderPreview: Identifiable {
     let statusColor: Color
     let windows: [WindowPreview]
 
-    init(settings: ProviderSettings) {
+    init(settings: ProviderSettings, liveUsage: ProviderLiveUsage? = nil) {
         id = settings.id
         name = settings.displayName
         symbol = settings.symbolName
-        status = settings.dataSource.shortLabel
-        statusColor = settings.dataSource.color
-        windows = settings.manualWindows.isEmpty
-            ? [WindowPreview(name: "Manual setup required", percent: 0, resetText: "No limits are guessed")]
-            : settings.manualWindows.map(WindowPreview.init(window:))
+        if let liveUsage {
+            status = liveUsage.status
+            statusColor = liveUsage.statusColor
+            windows = liveUsage.windows
+        } else {
+            status = settings.dataSource.shortLabel
+            statusColor = settings.dataSource.color
+            windows = settings.manualWindows.isEmpty
+                ? [WindowPreview(name: "Manual setup required", percent: 0, resetText: "No limits are guessed")]
+                : settings.manualWindows.map(WindowPreview.init(window:))
+        }
     }
 }
 
@@ -343,6 +416,212 @@ struct WindowPreview: Identifiable {
         name = window.label.isEmpty ? window.kind.rawValue : window.label
         percent = min(max(window.usedPercent / 100, 0), 1)
         resetText = window.resetNote.isEmpty ? "Manual window" : window.resetNote
+    }
+
+    init(codexWindow: CodexRateLimitWindow) {
+        name = Self.codexWindowName(minutes: codexWindow.windowMinutes)
+        percent = min(max(codexWindow.usedPercent / 100, 0), 1)
+        resetText = Self.codexResetText(resetsAt: Date(timeIntervalSince1970: codexWindow.resetsAt))
+    }
+
+    private static func codexWindowName(minutes: Int) -> String {
+        switch minutes {
+        case 300:
+            "5-Hour"
+        case 10_080:
+            "7-Day"
+        case 40_320...44_640:
+            "1 Month"
+        default:
+            "\(minutes) min"
+        }
+    }
+
+    private static func codexResetText(resetsAt: Date) -> String {
+        let remainingSeconds = Int(resetsAt.timeIntervalSince(Date()))
+        guard remainingSeconds > 0 else {
+            return "Reset time passed; run Codex CLI and refresh"
+        }
+
+        let days = remainingSeconds / 86_400
+        let hours = (remainingSeconds % 86_400) / 3_600
+        let minutes = (remainingSeconds % 3_600) / 60
+
+        if days > 0 {
+            return "Resets in \(days)d \(hours)h"
+        }
+        if hours > 0 {
+            return "Resets in \(hours)h \(minutes)m"
+        }
+        return "Resets in \(max(minutes, 1))m"
+    }
+}
+
+struct ProviderLiveUsage {
+    let status: String
+    let statusColor: Color
+    let windows: [WindowPreview]
+}
+
+struct CodexCliUsageReader {
+    func readLatestUsage() throws -> ProviderLiveUsage? {
+        let sessionRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex")
+            .appendingPathComponent("sessions")
+
+        guard FileManager.default.fileExists(atPath: sessionRoot.path) else {
+            return nil
+        }
+
+        let files = try codexSessionFiles(in: sessionRoot)
+        var latestEvent: CodexTokenCountEvent?
+
+        for file in files.prefix(80) {
+            for event in try tokenCountEvents(in: file) {
+                if latestEvent == nil || event.timestamp > latestEvent!.timestamp {
+                    latestEvent = event
+                }
+            }
+        }
+
+        guard let latestEvent else {
+            return nil
+        }
+
+        let windows = latestEvent.rateLimits.windows
+        if windows.isEmpty {
+            return ProviderLiveUsage(
+                status: "Local",
+                statusColor: .green,
+                windows: [
+                    WindowPreview(
+                        name: "Token usage",
+                        percent: 0,
+                        resetText: "Latest Codex CLI event: \(Self.relativeTimestamp(latestEvent.timestamp))"
+                    )
+                ]
+            )
+        }
+
+        return ProviderLiveUsage(
+            status: "Local",
+            statusColor: .green,
+            windows: windows
+        )
+    }
+
+    private func codexSessionFiles(in root: URL) throws -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+            options: [.skipsPackageDescendants]
+        ) else {
+            return []
+        }
+
+        var files: [(url: URL, modifiedAt: Date)] = []
+        for case let file as URL in enumerator {
+            guard file.pathExtension == "jsonl",
+                  file.lastPathComponent.hasPrefix("rollout-") else {
+                continue
+            }
+
+            let values = try file.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
+            guard values.isRegularFile == true else {
+                continue
+            }
+
+            files.append((file, values.contentModificationDate ?? .distantPast))
+        }
+
+        return files
+            .sorted { $0.modifiedAt > $1.modifiedAt }
+            .map(\.url)
+    }
+
+    private func tokenCountEvents(in file: URL) throws -> [CodexTokenCountEvent] {
+        let rawContent = try String(contentsOf: file, encoding: .utf8)
+        let decoder = JSONDecoder()
+        var events: [CodexTokenCountEvent] = []
+
+        for line in rawContent.split(separator: "\n") {
+            guard let data = line.data(using: .utf8),
+                  let envelope = try? decoder.decode(CodexEventEnvelope.self, from: data),
+                  envelope.payload.type == "token_count",
+                  let timestamp = Self.parseTimestamp(envelope.timestamp) else {
+                continue
+            }
+
+            events.append(
+                CodexTokenCountEvent(
+                    timestamp: timestamp,
+                    rateLimits: envelope.payload.rateLimits
+                )
+            )
+        }
+
+        return events
+    }
+
+    private static func parseTimestamp(_ rawValue: String) -> Date? {
+        let fractionalFormatter = ISO8601DateFormatter()
+        fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractionalFormatter.date(from: rawValue) {
+            return date
+        }
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: rawValue)
+    }
+
+    private static func relativeTimestamp(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+
+struct CodexTokenCountEvent {
+    let timestamp: Date
+    let rateLimits: CodexRateLimits
+}
+
+struct CodexEventEnvelope: Decodable {
+    let timestamp: String
+    let payload: Payload
+
+    struct Payload: Decodable {
+        let type: String
+        let rateLimits: CodexRateLimits
+
+        enum CodingKeys: String, CodingKey {
+            case type
+            case rateLimits = "rate_limits"
+        }
+    }
+}
+
+struct CodexRateLimits: Decodable {
+    let primary: CodexRateLimitWindow?
+    let secondary: CodexRateLimitWindow?
+
+    var windows: [WindowPreview] {
+        [primary, secondary]
+            .compactMap(\.self)
+            .map(WindowPreview.init(codexWindow:))
+    }
+}
+
+struct CodexRateLimitWindow: Decodable {
+    let resetsAt: TimeInterval
+    let usedPercent: Double
+    let windowMinutes: Int
+
+    enum CodingKeys: String, CodingKey {
+        case resetsAt = "resets_at"
+        case usedPercent = "used_percent"
+        case windowMinutes = "window_minutes"
     }
 }
 

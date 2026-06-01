@@ -25,6 +25,11 @@ Implemented:
 
 - `codex`: parses verified local Codex CLI `token_count` JSONL events.
 
+macOS UI status:
+
+- If the Codex provider is enabled and set to `Local adapter`, the menu-bar popover reads `~/.codex/sessions` directly and displays the latest verified 5-hour/weekly windows from Codex CLI `token_count` events.
+- If no `token_count` event exists yet, the popover shows a data issue instead of guessing.
+
 Cataloged but not yet parsed:
 
 - Claude Code, Devin for Terminal, Gemini CLI, OpenCode, Hermes, Kimi CLI, Cursor Agent, Qwen Code, Qoder CLI, GitHub Copilot CLI, Pi, Kiro CLI, Kilo, Mistral Vibe CLI, DeepSeek TUI, MiniMAX.
@@ -42,4 +47,3 @@ Mocks and fakes are only allowed in test code and must be clearly marked as test
 3. Preserve source metadata for every emitted value.
 4. Add sanitized fixtures and parser tests.
 5. Update docs with exactly what is verified and what remains manual.
-

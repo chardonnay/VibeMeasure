@@ -39,6 +39,8 @@ All required tools are present in the catalog:
 
 Only Codex CLI has an implemented local parser in this initial slice because local `token_count` events were verified. Other providers remain manual or adapter-pending until their data source is proven.
 
+On macOS, an enabled Codex provider with data source `Local adapter` reads the latest local Codex CLI `token_count` events from `~/.codex/sessions` when the popover opens or the user clicks Refresh.
+
 ## Display Modes
 
 The default first-run view is `Provider cycles`, but all built-in LLM providers are disabled for the menu-bar popover and widget until the user explicitly enables them in Settings.
