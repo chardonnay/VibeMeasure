@@ -1,0 +1,14 @@
+{
+  "KPlugin": {
+    "Id": "org.vibemeasure.plasmoid",
+    "Name": "VibeMeasure",
+    "Description": "Shows selected LLM usage windows from verified or manual VibeMeasure data.",
+    "Icon": "office-chart-bar",
+    "Version": "0.1.0",
+    "Website": "https://github.com/chardonnay/VibeMeasure",
+    "License": "MIT"
+  },
+  "KPackageStructure": "Plasma/Applet",
+  "X-Plasma-API-Minimum-Version": "6.0"
+}
+

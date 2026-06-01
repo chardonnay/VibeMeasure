@@ -1,0 +1,41 @@
+<Window
+    x:Class="VibeMeasure.Windows.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="VibeMeasure">
+    <Grid Padding="18" RowSpacing="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Orientation="Horizontal" Spacing="10">
+            <FontIcon Glyph="&#xE9D2;" />
+            <TextBlock Text="Usage Monitor" FontSize="20" FontWeight="SemiBold" />
+        </StackPanel>
+
+        <RadioButtons Grid.Row="1" Header="Display mode" SelectedIndex="0">
+            <x:String>Provider cycles</x:String>
+            <x:String>5 hours</x:String>
+            <x:String>1 week</x:String>
+            <x:String>1 month</x:String>
+        </RadioButtons>
+
+        <StackPanel Grid.Row="2" Spacing="16">
+            <TextBlock Text="Provider data is loaded from verified adapters or manual settings. Unknown limits are not guessed." TextWrapping="Wrap" />
+            <ProgressBar Value="4" Maximum="100" />
+            <TextBlock Text="Claude Code · 5-Hour · Manual setup" />
+            <ProgressBar Value="1" Maximum="100" />
+            <TextBlock Text="Codex CLI · 5-Hour · Local token_count events" />
+        </StackPanel>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="12" HorizontalAlignment="Right">
+            <Button Content="Refresh" />
+            <Button Content="Reports" />
+            <Button Content="Settings" />
+        </StackPanel>
+    </Grid>
+</Window>
+

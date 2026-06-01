@@ -1,0 +1,15 @@
+sequenceDiagram
+    participant UI as Native UI
+    participant Core as vibemeasure-core
+    participant Adapter as Provider Adapter
+    participant Source as Local file or official API
+    participant DB as SQLite
+
+    UI->>Core: Refresh provider
+    Core->>Adapter: collect()
+    Adapter->>Source: Read verified source
+    Source-->>Adapter: Raw usage/limit data
+    Adapter-->>Core: UsageEvent and LimitWindow
+    Core->>DB: Persist with SourceMeta
+    Core-->>UI: Snapshot
+

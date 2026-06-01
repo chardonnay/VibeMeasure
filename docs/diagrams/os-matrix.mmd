@@ -1,0 +1,18 @@
+flowchart LR
+    Core["Shared core snapshot"]
+    Mac["macOS MenuBarExtra"]
+    Win["Windows WinUI 3 tray app"]
+    Linux["Linux GTK/libadwaita shell"]
+    MacWidget["WidgetKit"]
+    WinWidget["Windows Widgets provider"]
+    Gnome["GNOME Shell extension"]
+    Kde["KDE Plasma widget"]
+
+    Core --> Mac
+    Core --> Win
+    Core --> Linux
+    Core --> MacWidget
+    Core --> WinWidget
+    Core --> Gnome
+    Core --> Kde
+

@@ -1,0 +1,8 @@
+{
+  "uuid": "vibemeasure@chardonnay.example",
+  "name": "VibeMeasure",
+  "description": "Shows verified or manually configured LLM usage windows from VibeMeasure snapshots.",
+  "shell-version": ["46", "47", "48"],
+  "url": "https://github.com/chardonnay/VibeMeasure"
+}
+
