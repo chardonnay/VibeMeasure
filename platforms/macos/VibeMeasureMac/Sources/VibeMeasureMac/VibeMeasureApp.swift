@@ -125,7 +125,9 @@ struct UsagePopover: View {
             Spacer()
 
             Toggle(isOn: $launchAtLogin) {
-                Image(systemName: "poweron")
+                Image(systemName: "person.crop.circle.badge.clock")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 26, height: 22)
             }
             .toggleStyle(.button)
             .labelStyle(.iconOnly)
