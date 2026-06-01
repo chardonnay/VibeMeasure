@@ -40,7 +40,7 @@ Cataloged but not yet parsed:
 
 These remain manual or adapter-pending until a local format or official API is verified.
 
-Cursor Agent note: the local `~/.cursor/ai-tracking/ai-code-tracking.db` schema observed during validation contains AI-code tracking tables, not current token or quota usage. The Cursor CLI help and official CLI docs do not currently document a local quota command. Cursor remains adapter-pending until a verified source is available.
+Cursor Agent note: this provider refers to Anysphere/Cursor's `cursor-agent` CLI documented at `docs.cursor.com` and distributed through Cursor's official `cursor.com` product surface. The local `~/.cursor/ai-tracking/ai-code-tracking.db` schema observed during validation contains AI-code tracking tables, not current token or quota usage. The Cursor CLI help and official CLI docs do not currently document a local quota command or plan-name output. Cursor remains manual/no-adapter until a verified source is available; users can store the active plan name manually in provider settings.
 
 ## Test Double Rule
 

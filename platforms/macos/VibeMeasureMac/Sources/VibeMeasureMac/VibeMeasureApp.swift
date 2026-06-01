@@ -324,8 +324,15 @@ struct ProviderSection: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Image(systemName: provider.symbol)
-                Text(provider.name)
-                    .font(.headline)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(provider.name)
+                        .font(.headline)
+                    if !provider.planName.isEmpty {
+                        Text(provider.planName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Spacer()
                 Text(provider.status)
                     .font(.caption.weight(.bold))
@@ -461,6 +468,7 @@ struct SettingsView: View {
 struct ProviderPreview: Identifiable {
     let id: String
     let name: String
+    let planName: String
     let symbol: String
     let status: String
     let statusColor: Color
@@ -469,17 +477,18 @@ struct ProviderPreview: Identifiable {
     init(settings: ProviderSettings, liveUsage: ProviderLiveUsage? = nil) {
         id = settings.id
         name = settings.displayName
+        planName = settings.planName.trimmingCharacters(in: .whitespacesAndNewlines)
         symbol = settings.symbolName
         if let liveUsage {
             status = liveUsage.status
             statusColor = liveUsage.statusColor
             windows = liveUsage.windows
         } else if settings.dataSource == .localAdapter && !settings.hasVerifiedLocalAdapter {
-            status = "Adapter pending"
+            status = "No adapter"
             statusColor = .orange
             windows = [
                 WindowPreview(
-                    name: "Adapter pending",
+                    name: "Usage unavailable",
                     percent: 0,
                     resetText: "No verified local usage source is implemented for \(settings.displayName)"
                 )
@@ -496,6 +505,7 @@ struct ProviderPreview: Identifiable {
     private init(
         id: String,
         name: String,
+        planName: String,
         symbol: String,
         status: String,
         statusColor: Color,
@@ -503,6 +513,7 @@ struct ProviderPreview: Identifiable {
     ) {
         self.id = id
         self.name = name
+        self.planName = planName
         self.symbol = symbol
         self.status = status
         self.statusColor = statusColor
@@ -521,6 +532,7 @@ struct ProviderPreview: Identifiable {
         return ProviderPreview(
             id: id,
             name: name,
+            planName: planName,
             symbol: symbol,
             status: status,
             statusColor: statusColor,
@@ -1049,6 +1061,7 @@ struct ProviderEditor: View {
                         .foregroundStyle(.secondary)
                 }
                 TextField("Display name", text: $provider.displayName)
+                TextField("Plan name", text: $provider.planName)
                 TextField("Command hint", text: $provider.commandHint)
                 TextField("SF Symbol", text: $provider.symbolName)
                 Picker("Data source", selection: $provider.dataSource) {
@@ -1066,6 +1079,11 @@ struct ProviderEditor: View {
                     .frame(width: 130)
                 }
                 Toggle("Enabled in popover and widget", isOn: $provider.isEnabled)
+                if provider.dataSource == .localAdapter && !provider.hasVerifiedLocalAdapter {
+                    Text("No verified local usage adapter exists for this provider yet. Use manual windows for now.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("Manual windows") {
@@ -1273,6 +1291,7 @@ final class ProviderSettingsStore: ObservableObject {
 struct ProviderSettings: Codable, Identifiable, Equatable {
     var id: String
     var displayName: String
+    var planName: String
     var commandHint: String
     var symbolName: String
     var dataSource: ProviderDataSource
@@ -1284,6 +1303,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id
         case displayName
+        case planName
         case commandHint
         case symbolName
         case dataSource
@@ -1296,6 +1316,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
     init(
         id: String,
         displayName: String,
+        planName: String = "",
         commandHint: String,
         symbolName: String,
         dataSource: ProviderDataSource,
@@ -1306,6 +1327,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
     ) {
         self.id = id
         self.displayName = displayName
+        self.planName = planName
         self.commandHint = commandHint
         self.symbolName = symbolName
         self.dataSource = dataSource
@@ -1319,6 +1341,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         displayName = try container.decode(String.self, forKey: .displayName)
+        planName = try container.decodeIfPresent(String.self, forKey: .planName) ?? ""
         commandHint = try container.decode(String.self, forKey: .commandHint)
         symbolName = try container.decode(String.self, forKey: .symbolName)
         dataSource = try container.decode(ProviderDataSource.self, forKey: .dataSource)
