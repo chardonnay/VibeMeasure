@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import VibeMeasureMac
 
 final class UsageWindowTests: XCTestCase {
@@ -32,5 +33,43 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertEqual(preview.percent, 0.42, accuracy: 0.001)
         XCTAssertEqual(preview.percentText, "42%")
         XCTAssertEqual(preview.resetText, "Resets in 10m")
+    }
+
+    func testCodexPlanTypeDisplaysPlanName() throws {
+        let json = """
+        {
+          "plan_type": "plus",
+          "primary": {
+            "resets_at": 1600,
+            "used_percent": 42,
+            "window_minutes": 300
+          }
+        }
+        """
+
+        let rateLimits = try JSONDecoder().decode(CodexRateLimits.self, from: Data(json.utf8))
+
+        XCTAssertEqual(rateLimits.planName, "Plus")
+    }
+
+    func testLivePlanOverridesConfiguredPlanInProviderPreview() {
+        let settings = ProviderSettings.builtIn(
+            id: "codex",
+            displayName: "Codex CLI",
+            planName: "Manual Plan",
+            commandHint: "codex",
+            symbolName: "terminal",
+            dataSource: .localAdapter
+        )
+        let liveUsage = ProviderLiveUsage(
+            status: "Local",
+            statusColor: .green,
+            planName: "Plus",
+            windows: []
+        )
+
+        let preview = ProviderPreview(settings: settings, liveUsage: liveUsage)
+
+        XCTAssertEqual(preview.planName, "Plus")
     }
 }

@@ -1326,7 +1326,13 @@ struct ProviderPreview: Identifiable {
     init(settings: ProviderSettings, liveUsage: ProviderLiveUsage? = nil) {
         id = settings.id
         name = settings.displayName
-        planName = settings.planName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let configuredPlanName = settings.planName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let livePlanName = liveUsage?.planName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let livePlanName, !livePlanName.isEmpty {
+            planName = livePlanName
+        } else {
+            planName = configuredPlanName
+        }
         symbol = settings.symbolName
         if let liveUsage {
             status = liveUsage.status
@@ -1583,6 +1589,78 @@ private func stringValue(for keys: [String], in dictionary: [String: Any]) -> St
     return nil
 }
 
+private func displayPlanName(from rawValue: String?) -> String? {
+    guard let rawValue else {
+        return nil
+    }
+
+    let trimmedValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedValue.isEmpty, trimmedValue.count <= 48 else {
+        return nil
+    }
+
+    let scalarSet = CharacterSet.alphanumerics.union(.whitespaces).union(CharacterSet(charactersIn: "_-+"))
+    guard trimmedValue.unicodeScalars.allSatisfy({ scalarSet.contains($0) }) else {
+        return nil
+    }
+
+    if trimmedValue == trimmedValue.lowercased() || trimmedValue.contains("_") || trimmedValue.contains("-") {
+        return trimmedValue
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(separator: " ")
+            .map { word in
+                word.prefix(1).uppercased() + word.dropFirst().lowercased()
+            }
+            .joined(separator: " ")
+    }
+
+    return trimmedValue
+}
+
+private func planNameValue(in dictionary: [String: Any]) -> String? {
+    displayPlanName(
+        from: stringValue(
+            for: [
+                "plan",
+                "plan_name",
+                "planName",
+                "plan_type",
+                "planType",
+                "subscription",
+                "subscription_tier",
+                "subscriptionTier",
+                "tier"
+            ],
+            in: dictionary
+        )
+    )
+}
+
+private func findPlanName(in value: Any) -> String? {
+    if let dictionary = value as? [String: Any] {
+        if let planName = planNameValue(in: dictionary) {
+            return planName
+        }
+
+        for nestedValue in dictionary.values {
+            if let planName = findPlanName(in: nestedValue) {
+                return planName
+            }
+        }
+    }
+
+    if let array = value as? [Any] {
+        for nestedValue in array {
+            if let planName = findPlanName(in: nestedValue) {
+                return planName
+            }
+        }
+    }
+
+    return nil
+}
+
 private func parseFlexibleDate(_ value: String) -> Date? {
     let fractionalFormatter = ISO8601DateFormatter()
     fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -1604,7 +1682,20 @@ private func relativeTimestamp(_ date: Date) -> String {
 struct ProviderLiveUsage {
     let status: String
     let statusColor: Color
+    let planName: String?
     let windows: [WindowPreview]
+
+    init(
+        status: String,
+        statusColor: Color,
+        planName: String? = nil,
+        windows: [WindowPreview]
+    ) {
+        self.status = status
+        self.statusColor = statusColor
+        self.planName = planName
+        self.windows = windows
+    }
 }
 
 struct ClaudeCodeUsageReader {
@@ -1612,21 +1703,81 @@ struct ClaudeCodeUsageReader {
         let claudeRoot = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude")
 
-        guard FileManager.default.fileExists(atPath: claudeRoot.path) else {
-            return nil
-        }
+        var discoveredPlanName: String?
 
-        for file in try recentJSONFiles(in: claudeRoot).prefix(120) {
-            for object in try jsonObjects(in: file).reversed() {
-                if let rateLimits = Self.findRateLimits(in: object),
-                   let windows = Self.windows(from: rateLimits),
-                   !windows.isEmpty {
-                    return ProviderLiveUsage(status: "Local", statusColor: .green, windows: windows)
+        if FileManager.default.fileExists(atPath: claudeRoot.path) {
+            for file in try recentJSONFiles(in: claudeRoot).prefix(120) {
+                for object in try jsonObjects(in: file).reversed() {
+                    discoveredPlanName = discoveredPlanName ?? Self.directPlanName(in: object)
+
+                    if let rateLimits = Self.findRateLimits(in: object) {
+                        discoveredPlanName = discoveredPlanName ?? planNameValue(in: rateLimits)
+                        guard let windows = Self.windows(from: rateLimits), !windows.isEmpty else {
+                            continue
+                        }
+                        let planName = planNameValue(in: rateLimits)
+                            ?? discoveredPlanName
+                            ?? Self.authStatusPlanName()
+                        return ProviderLiveUsage(
+                            status: "Local",
+                            statusColor: .green,
+                            planName: planName,
+                            windows: windows
+                        )
+                    }
                 }
             }
         }
 
+        if let planName = discoveredPlanName ?? Self.authStatusPlanName() {
+            return ProviderLiveUsage(
+                status: "Local",
+                statusColor: .green,
+                planName: planName,
+                windows: [
+                    WindowPreview(
+                        name: "Usage unavailable",
+                        percent: 0,
+                        resetText: "No verified Claude Code rate-limit window found"
+                    )
+                ]
+            )
+        }
+
         return nil
+    }
+
+    private static func authStatusPlanName() -> String? {
+        let process = Process()
+        let standardOutput = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["claude", "auth", "status"]
+        process.standardOutput = standardOutput
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+
+        guard process.terminationStatus == 0 else {
+            return nil
+        }
+
+        let outputData = standardOutput.fileHandleForReading.readDataToEndOfFile()
+        guard let object = try? JSONSerialization.jsonObject(with: outputData) else {
+            return nil
+        }
+        return findPlanName(in: object)
+    }
+
+    private static func directPlanName(in value: Any) -> String? {
+        guard let dictionary = value as? [String: Any] else {
+            return nil
+        }
+        return planNameValue(in: dictionary)
     }
 
     private static func findRateLimits(in value: Any) -> [String: Any]? {
@@ -1715,6 +1866,7 @@ struct CodexCliUsageReader {
             return ProviderLiveUsage(
                 status: "Local",
                 statusColor: .green,
+                planName: latestEvent.rateLimits.planName,
                 windows: [
                     WindowPreview(
                         name: "Token usage",
@@ -1728,6 +1880,7 @@ struct CodexCliUsageReader {
         return ProviderLiveUsage(
             status: "Local",
             statusColor: .green,
+            planName: latestEvent.rateLimits.planName,
             windows: windows
         )
     }
@@ -1827,6 +1980,17 @@ struct CodexEventEnvelope: Decodable {
 struct CodexRateLimits: Decodable {
     let primary: CodexRateLimitWindow?
     let secondary: CodexRateLimitWindow?
+    let planType: String?
+
+    enum CodingKeys: String, CodingKey {
+        case primary
+        case secondary
+        case planType = "plan_type"
+    }
+
+    var planName: String? {
+        displayPlanName(from: planType)
+    }
 
     var windows: [WindowPreview] {
         windows(relativeTo: Date())
