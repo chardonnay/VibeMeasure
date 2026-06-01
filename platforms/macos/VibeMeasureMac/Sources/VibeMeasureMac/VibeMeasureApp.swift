@@ -1,7 +1,14 @@
+import AppKit
 import Combine
 import Foundation
 import SwiftUI
 import UserNotifications
+
+private enum UsageWindowMetrics {
+    static let width: CGFloat = 460
+    static let minimumHeight: CGFloat = 480
+    static let maximumHeight: CGFloat = 1_000
+}
 
 @main
 struct VibeMeasureApp: App {
@@ -20,7 +27,8 @@ struct VibeMeasureApp: App {
                 providerStore: appModel.providerStore,
                 usageStore: appModel.usageStore
             )
-            .frame(width: 460, height: usagePopoverHeight)
+            .frame(width: UsageWindowMetrics.width, height: CGFloat(usagePopoverHeight))
+            .background(UsageWindowResizeConfigurator(height: $usagePopoverHeight))
         }
         .menuBarExtraStyle(.window)
 
@@ -53,6 +61,129 @@ enum DisplayMode: String, CaseIterable, Identifiable {
             "1 Week"
         case .oneMonth:
             "1 Month"
+        }
+    }
+}
+
+struct UsageWindowResizeConfigurator: NSViewRepresentable {
+    @Binding var height: Double
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(height: $height)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            context.coordinator.configure(window: view.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.height = $height
+        DispatchQueue.main.async {
+            context.coordinator.configure(window: view.window)
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var height: Binding<Double>
+
+        private weak var configuredWindow: NSWindow?
+        private var isApplyingStoredSize = false
+
+        init(height: Binding<Double>) {
+            self.height = height
+            super.init()
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
+
+        func configure(window: NSWindow?) {
+            guard let window else {
+                return
+            }
+
+            if configuredWindow !== window {
+                if let configuredWindow {
+                    NotificationCenter.default.removeObserver(
+                        self,
+                        name: NSWindow.didResizeNotification,
+                        object: configuredWindow
+                    )
+                }
+
+                configuredWindow = window
+                window.styleMask.insert(.resizable)
+                window.contentMinSize = NSSize(
+                    width: UsageWindowMetrics.width,
+                    height: UsageWindowMetrics.minimumHeight
+                )
+                window.contentMaxSize = NSSize(
+                    width: UsageWindowMetrics.width,
+                    height: UsageWindowMetrics.maximumHeight
+                )
+
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(windowDidResize(_:)),
+                    name: NSWindow.didResizeNotification,
+                    object: window,
+                )
+            }
+
+            applyStoredHeight(to: window)
+        }
+
+        @objc
+        private func windowDidResize(_ notification: Notification) {
+            guard let resizedWindow = notification.object as? NSWindow else {
+                return
+            }
+            storeHeight(from: resizedWindow)
+        }
+
+        private func applyStoredHeight(to window: NSWindow) {
+            let storedHeight = Self.clampedHeight(CGFloat(height.wrappedValue))
+            if abs(height.wrappedValue - Double(storedHeight)) > 0.5 {
+                height.wrappedValue = Double(storedHeight)
+            }
+
+            let currentHeight = window.contentView?.bounds.height ?? window.frame.height
+            guard abs(currentHeight - storedHeight) > 1 else {
+                return
+            }
+
+            isApplyingStoredSize = true
+            window.setContentSize(NSSize(width: UsageWindowMetrics.width, height: storedHeight))
+            isApplyingStoredSize = false
+        }
+
+        private func storeHeight(from window: NSWindow) {
+            guard !isApplyingStoredSize else {
+                return
+            }
+
+            let contentHeight = window.contentView?.bounds.height ?? window.frame.height
+            let clampedHeight = Self.clampedHeight(contentHeight)
+            if abs(contentHeight - clampedHeight) > 1 {
+                isApplyingStoredSize = true
+                window.setContentSize(NSSize(width: UsageWindowMetrics.width, height: clampedHeight))
+                isApplyingStoredSize = false
+            }
+
+            guard abs(height.wrappedValue - Double(clampedHeight)) > 0.5 else {
+                return
+            }
+            height.wrappedValue = Double(clampedHeight)
+        }
+
+        private static func clampedHeight(_ height: CGFloat) -> CGFloat {
+            min(max(height, UsageWindowMetrics.minimumHeight), UsageWindowMetrics.maximumHeight)
         }
     }
 }
@@ -389,7 +520,7 @@ struct SettingsView: View {
                     Stepper(
                         "\(Int(usagePopoverHeight)) px",
                         value: $usagePopoverHeight,
-                        in: 480...1_000,
+                        in: Double(UsageWindowMetrics.minimumHeight)...Double(UsageWindowMetrics.maximumHeight),
                         step: 20
                     )
                     .frame(width: 140)
