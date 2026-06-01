@@ -11,6 +11,8 @@ Reports summarize token usage and cost status over a selected period.
 
 The CLI already supports custom start and end timestamps. Native UIs will map dropdown selections to these ranges.
 
+macOS status: the menu-bar app opens a native Reports window from the Usage footer. It currently shows the latest live/manual snapshot for enabled providers. Historical native `.xlsx`/`.pdf` export stays disabled until the macOS app writes usage events to the shared SQLite store.
+
 ## Exports
 
 - `.xlsx`: generated with `rust_xlsxwriter`.
@@ -29,4 +31,3 @@ cargo run -p vibemeasure-cli -- report \
   --xlsx report.xlsx \
   --pdf report.pdf
 ```
-

@@ -10,6 +10,10 @@ private enum UsageWindowMetrics {
     static let maximumHeight: CGFloat = 1_000
 }
 
+private enum AppWindows {
+    static let reports = "reports"
+}
+
 @main
 struct VibeMeasureApp: App {
     @AppStorage("displayMode") private var displayMode = DisplayMode.providerCycles.rawValue
@@ -40,6 +44,14 @@ struct VibeMeasureApp: App {
                 providerStore: appModel.providerStore
             )
         }
+
+        Window("Reports", id: AppWindows.reports) {
+            ReportsView(
+                providerStore: appModel.providerStore,
+                usageStore: appModel.usageStore
+            )
+        }
+        .defaultSize(width: 860, height: 620)
     }
 }
 
@@ -322,6 +334,7 @@ final class UsageRefreshStore: ObservableObject {
 }
 
 struct UsagePopover: View {
+    @Environment(\.openWindow) private var openWindow
     @Binding var displayMode: DisplayMode
     @ObservedObject var providerStore: ProviderSettingsStore
     @ObservedObject var usageStore: UsageRefreshStore
@@ -424,7 +437,10 @@ struct UsagePopover: View {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
 
-            Button {} label: {
+            Button {
+                usageStore.pullNow(providers: providerStore.providers)
+                openWindow(id: AppWindows.reports)
+            } label: {
                 Label("Reports", systemImage: "doc.text.magnifyingglass")
             }
 
@@ -491,6 +507,153 @@ struct ProviderSection: View {
             }
         }
     }
+}
+
+enum ReportPeriod: String, CaseIterable, Identifiable {
+    case currentWeek = "Current week"
+    case currentMonth = "Current month"
+    case currentYear = "Current year"
+    case custom = "Custom"
+
+    var id: String { rawValue }
+}
+
+struct ReportsView: View {
+    @ObservedObject var providerStore: ProviderSettingsStore
+    @ObservedObject var usageStore: UsageRefreshStore
+    @State private var period = ReportPeriod.currentWeek
+    @State private var customStartDate = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+    @State private var customEndDate = Date()
+
+    private var rows: [ReportSnapshotRow] {
+        providerStore.providers
+            .filter(\.isEnabled)
+            .flatMap { provider in
+                ProviderPreview(
+                    settings: provider,
+                    liveUsage: usageStore.liveUsageByProvider[provider.id]
+                )
+                .reportRows()
+            }
+    }
+
+    private var periodLabel: String {
+        switch period {
+        case .currentWeek:
+            "Current week"
+        case .currentMonth:
+            "Current month"
+        case .currentYear:
+            "Current year"
+        case .custom:
+            "\(customStartDate.formatted(date: .abbreviated, time: .omitted)) - \(customEndDate.formatted(date: .abbreviated, time: .omitted))"
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            controls
+            Divider()
+            content
+            Divider()
+            footer
+        }
+        .frame(minWidth: 820, minHeight: 560)
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.title2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Reports")
+                    .font(.headline)
+                Text(periodLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                usageStore.pullNow(providers: providerStore.providers)
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
+        }
+        .padding(16)
+    }
+
+    private var controls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Period", selection: $period) {
+                ForEach(ReportPeriod.allCases) { period in
+                    Text(period.rawValue).tag(period)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if period == .custom {
+                HStack {
+                    DatePicker("Start", selection: $customStartDate, displayedComponents: .date)
+                    DatePicker("End", selection: $customEndDate, displayedComponents: .date)
+                }
+            }
+
+            Text("The macOS app currently shows the latest live/manual snapshot. Historical XLSX/PDF export requires persisted SQLite usage events.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(16)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if rows.isEmpty {
+            ContentUnavailableView(
+                "No report data",
+                systemImage: "chart.bar.doc.horizontal",
+                description: Text("Enable a provider or add manual windows in Settings.")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            Table(rows) {
+                TableColumn("Provider", value: \.providerName)
+                TableColumn("Plan", value: \.planName)
+                TableColumn("Window", value: \.windowName)
+                TableColumn("Usage", value: \.percentText)
+                TableColumn("Source", value: \.source)
+                TableColumn("Notes", value: \.notes)
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            Text("Exports are disabled until the native app writes historical usage events to SQLite.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Export XLSX") {}
+                .disabled(true)
+                .help("Requires persisted SQLite usage events.")
+            Button("Export PDF") {}
+                .disabled(true)
+                .help("Requires persisted SQLite usage events.")
+        }
+        .padding(16)
+        .background(.bar)
+    }
+}
+
+struct ReportSnapshotRow: Identifiable {
+    let id = UUID()
+    let providerName: String
+    let planName: String
+    let windowName: String
+    let percentText: String
+    let source: String
+    let notes: String
 }
 
 struct SettingsView: View {
@@ -671,6 +834,19 @@ struct ProviderPreview: Identifiable {
                 ? [WindowPreview.manualSetupRequired(for: displayMode)]
                 : matchingWindows
         )
+    }
+
+    func reportRows() -> [ReportSnapshotRow] {
+        windows.map { window in
+            ReportSnapshotRow(
+                providerName: name,
+                planName: planName.isEmpty ? "-" : planName,
+                windowName: window.name,
+                percentText: window.percentText,
+                source: status,
+                notes: window.resetText
+            )
+        }
     }
 }
 
