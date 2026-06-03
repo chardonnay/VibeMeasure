@@ -2124,7 +2124,7 @@ struct MiniMaxCliUsageReader {
             throw LocalUsageReaderError.invalidResponse(response.baseResp.statusMsg)
         }
 
-        let windows = response.modelRemains.flatMap(\.windows)
+        let windows = response.windows
         guard !windows.isEmpty else {
             return nil
         }
@@ -2212,6 +2212,10 @@ enum LocalUsageReaderError: LocalizedError {
 struct MiniMaxQuotaResponse: Decodable {
     let modelRemains: [MiniMaxModelRemain]
     let baseResp: MiniMaxBaseResponse
+
+    var windows: [WindowPreview] {
+        modelRemains.flatMap(\.windows)
+    }
 }
 
 struct MiniMaxBaseResponse: Decodable {
@@ -2272,7 +2276,20 @@ struct MiniMaxModelRemain: Decodable {
     }
 
     private var modelLabel: String {
-        modelName.isEmpty ? "MiniMAX" : modelName
+        switch modelName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "":
+            "MiniMAX"
+        case "general":
+            "Text"
+        case "video":
+            "Video"
+        case "audio", "speech":
+            "Audio"
+        case "music":
+            "Music"
+        default:
+            displayPlanName(from: modelName) ?? modelName
+        }
     }
 
     private static func usedPercent(usageCount: Int, totalCount: Int, remainingPercent: Double) -> Double {
@@ -2296,7 +2313,8 @@ struct MiniMaxModelRemain: Decodable {
         )
 
         if totalCount > 0 {
-            return "\(resetPrefix); \(usageCount)/\(totalCount) used"
+            let availableCount = max(totalCount - usageCount, 0)
+            return "\(resetPrefix); \(usageCount)/\(totalCount) used; \(availableCount) available"
         }
 
         return "\(resetPrefix); remaining \(Int(remainingPercent))%"
