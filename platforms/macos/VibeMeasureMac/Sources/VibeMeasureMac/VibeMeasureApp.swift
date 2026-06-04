@@ -12,6 +12,7 @@ private enum UsageWindowMetrics {
 }
 
 private enum AppWindows {
+    static let usage = "usage"
     static let reports = "reports"
 }
 
@@ -24,18 +25,17 @@ struct VibeMeasureApp: App {
 
     var body: some Scene {
         MenuBarExtra("VibeMeasure", systemImage: "chart.bar.xaxis") {
-            UsagePopover(
-                displayMode: Binding(
-                    get: { DisplayMode(rawValue: displayMode) ?? .providerCycles },
-                    set: { displayMode = $0.rawValue }
-                ),
-                providerStore: appModel.providerStore,
-                usageStore: appModel.usageStore
-            )
+            usageMonitorContent
             .frame(width: UsageWindowMetrics.width, height: CGFloat(usagePopoverHeight))
             .background(UsageWindowResizeConfigurator(height: $usagePopoverHeight))
         }
         .menuBarExtraStyle(.window)
+
+        WindowGroup("Usage Monitor", id: AppWindows.usage) {
+            usageMonitorContent
+                .frame(minWidth: UsageWindowMetrics.width, minHeight: UsageWindowMetrics.minimumHeight)
+        }
+        .defaultSize(width: UsageWindowMetrics.width, height: CGFloat(usagePopoverHeight))
 
         Settings {
             SettingsView(
@@ -53,6 +53,21 @@ struct VibeMeasureApp: App {
             )
         }
         .defaultSize(width: 860, height: 620)
+    }
+
+    private var usageDisplayMode: Binding<DisplayMode> {
+        Binding(
+            get: { DisplayMode(rawValue: displayMode) ?? .providerCycles },
+            set: { displayMode = $0.rawValue }
+        )
+    }
+
+    private var usageMonitorContent: some View {
+        UsagePopover(
+            displayMode: usageDisplayMode,
+            providerStore: appModel.providerStore,
+            usageStore: appModel.usageStore
+        )
     }
 }
 
