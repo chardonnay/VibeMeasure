@@ -2229,7 +2229,14 @@ struct MiniMaxQuotaResponse: Decodable {
     let baseResp: MiniMaxBaseResponse
 
     var windows: [WindowPreview] {
-        modelRemains.flatMap(\.windows)
+        modelRemains.flatMap(\.windows) + missingMediaWindows
+    }
+
+    private var missingMediaWindows: [WindowPreview] {
+        let reportedCategories = Set(modelRemains.map(\.quotaCategory))
+        return MiniMaxQuotaCategory.mediaCategories
+            .filter { !reportedCategories.contains($0) }
+            .flatMap(\.unreportedWindows)
     }
 }
 
@@ -2253,10 +2260,14 @@ struct MiniMaxModelRemain: Decodable {
     let currentIntervalRemainingPercent: Double
     let currentWeeklyRemainingPercent: Double
 
+    var quotaCategory: MiniMaxQuotaCategory {
+        MiniMaxQuotaCategory(modelName: modelName)
+    }
+
     var windows: [WindowPreview] {
         [
             WindowPreview(
-                name: "\(modelLabel) 5-Hour",
+                name: "\(quotaCategory.displayName) 5-Hour",
                 percent: Self.usedPercent(
                     usageCount: currentIntervalUsageCount,
                     totalCount: currentIntervalTotalCount,
@@ -2272,7 +2283,7 @@ struct MiniMaxModelRemain: Decodable {
                 displayModes: [.fiveHours]
             ),
             WindowPreview(
-                name: "\(modelLabel) 1 Week",
+                name: "\(quotaCategory.displayName) 1 Week",
                 percent: Self.usedPercent(
                     usageCount: currentWeeklyUsageCount,
                     totalCount: currentWeeklyTotalCount,
@@ -2288,23 +2299,6 @@ struct MiniMaxModelRemain: Decodable {
                 displayModes: [.oneWeek]
             )
         ]
-    }
-
-    private var modelLabel: String {
-        switch modelName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "":
-            "MiniMAX"
-        case "general":
-            "Text"
-        case "video":
-            "Video"
-        case "audio", "speech":
-            "Audio"
-        case "music":
-            "Music"
-        default:
-            displayPlanName(from: modelName) ?? modelName
-        }
     }
 
     private static func usedPercent(usageCount: Int, totalCount: Int, remainingPercent: Double) -> Double {
@@ -2360,6 +2354,64 @@ struct MiniMaxModelRemain: Decodable {
             return "\(hours)h \(minutes)m"
         }
         return "\(max(minutes, 1))m"
+    }
+}
+
+enum MiniMaxQuotaCategory: Hashable {
+    case text
+    case video
+    case audio
+    case music
+    case other(String)
+
+    static let mediaCategories: [MiniMaxQuotaCategory] = [.audio, .music]
+
+    init(modelName: String) {
+        let normalizedName = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch normalizedName.lowercased() {
+        case "", "general":
+            self = .text
+        case "video":
+            self = .video
+        case "audio", "speech":
+            self = .audio
+        case "music":
+            self = .music
+        default:
+            self = .other(displayPlanName(from: normalizedName) ?? normalizedName)
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .text:
+            "Text"
+        case .video:
+            "Video"
+        case .audio:
+            "Audio"
+        case .music:
+            "Music"
+        case let .other(name):
+            name.isEmpty ? "MiniMAX" : name
+        }
+    }
+
+    var unreportedWindows: [WindowPreview] {
+        [
+            WindowPreview(
+                name: "\(displayName) 5-Hour",
+                percent: 0,
+                resetText: "Not reported by mmx quota show; no verified usage or available quota",
+                displayModes: [.fiveHours]
+            ),
+            WindowPreview(
+                name: "\(displayName) 1 Week",
+                percent: 0,
+                resetText: "Not reported by mmx quota show; no verified usage or available quota",
+                displayModes: [.oneWeek]
+            )
+        ]
     }
 }
 
