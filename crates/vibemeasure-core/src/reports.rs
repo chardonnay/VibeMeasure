@@ -7,9 +7,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Result,
     catalog::tool_by_id,
-    model::{UsageEvent, UsageSummary},
+    model::{CurrencyRate, PricingRule, UsageEvent, UsageSummary},
     store::VibeStore,
 };
+
+mod costs;
+mod pdf;
+pub use costs::ReportCost;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReportRequest {
@@ -22,30 +26,48 @@ pub struct ReportRequest {
 pub struct UsageReport {
     pub request: ReportRequest,
     pub rows: Vec<UsageSummary>,
+    #[serde(default)]
+    pub costs: BTreeMap<String, ReportCost>,
     pub notes: Vec<String>,
 }
 
 pub fn build_usage_report(request: ReportRequest, events: &[UsageEvent]) -> UsageReport {
+    build_priced_usage_report(request, events, &[], &[])
+}
+
+pub fn build_priced_usage_report(
+    mut request: ReportRequest,
+    events: &[UsageEvent],
+    rules: &[PricingRule],
+    rates: &[CurrencyRate],
+) -> UsageReport {
+    request.currency = request.currency.trim().to_ascii_uppercase();
     let mut by_tool: BTreeMap<String, Vec<UsageEvent>> = BTreeMap::new();
-    for event in events {
+    for event in events.iter().filter(|event| {
+        event.occurred_at >= request.starts_at && event.occurred_at < request.ends_at
+    }) {
         by_tool
             .entry(event.tool_id.clone())
             .or_default()
             .push(event.clone());
     }
 
-    let rows = by_tool
-        .iter()
-        .map(|(tool_id, events)| VibeStore::aggregate_usage(events, tool_id))
-        .collect::<Vec<_>>();
+    let mut rows = Vec::with_capacity(by_tool.len());
+    let mut costs = BTreeMap::new();
+    for (tool_id, events) in by_tool {
+        rows.push(VibeStore::aggregate_usage(&events, &tool_id));
+        costs.insert(
+            tool_id,
+            costs::estimate(&events, rules, rates, &request.currency),
+        );
+    }
 
     UsageReport {
         request,
         rows,
+        costs,
         notes: vec![
-            "Costs are omitted unless a verified official API value or manual pricing rule is present."
-                .to_string(),
-            "Unknown provider limits are not guessed; configure them manually in settings.".to_string(),
+            "API-equivalent estimates use the configured token prices and exchange rates at report generation. Provider invoices and subscription charges are separate.".to_string(),
         ],
     }
 }
@@ -65,6 +87,9 @@ pub fn export_xlsx(report: &UsageReport, path: impl AsRef<Path>) -> Result<()> {
         "Reasoning output tokens",
         "Total tokens",
         "Source notes",
+        "Estimated cost",
+        "Currency",
+        "Cost status and sources",
     ]
     .into_iter()
     .enumerate()
@@ -85,6 +110,13 @@ pub fn export_xlsx(report: &UsageReport, path: impl AsRef<Path>) -> Result<()> {
         worksheet.write_number(row_number, 5, row.reasoning_output_tokens as f64)?;
         worksheet.write_number(row_number, 6, row.total_tokens as f64)?;
         worksheet.write_string(row_number, 7, row.source_labels.join("; "))?;
+        if let Some(cost) = report.costs.get(&row.tool_id) {
+            if let Some(amount) = cost.amount() {
+                worksheet.write_number(row_number, 8, amount)?;
+            }
+            worksheet.write_string(row_number, 10, cost.description())?;
+        }
+        worksheet.write_string(row_number, 9, &report.request.currency)?;
     }
 
     worksheet.autofit();
@@ -106,58 +138,22 @@ pub fn export_pdf(report: &UsageReport, path: impl AsRef<Path>) -> Result<()> {
             .map(|tool| tool.display_name.to_string())
             .unwrap_or_else(|| row.tool_id.clone());
         lines.push(format!("{display_name}: {} total tokens", row.total_tokens));
+        lines.push(format!("Usage source: {}", row.source_labels.join("; ")));
+        if let Some(cost) = report.costs.get(&row.tool_id) {
+            let amount = cost
+                .amount()
+                .map(|value| format!("{value} {}. ", report.request.currency))
+                .unwrap_or_default();
+            lines.push(format!("Cost: {amount}{}", cost.description()));
+        }
+        lines.push(String::new());
     }
 
     lines.push(String::new());
     lines.extend(report.notes.iter().cloned());
 
-    fs::write(path, minimal_pdf(&lines))?;
+    fs::write(path, pdf::document(&lines))?;
     Ok(())
-}
-
-fn minimal_pdf(lines: &[String]) -> Vec<u8> {
-    let mut content = String::from("BT\n/F1 12 Tf\n50 780 Td\n14 TL\n");
-    for line in lines {
-        content.push('(');
-        content.push_str(&escape_pdf_text(line));
-        content.push_str(") Tj\nT*\n");
-    }
-    content.push_str("ET\n");
-
-    let objects = [
-        "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string(),
-        "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".to_string(),
-        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n".to_string(),
-        "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".to_string(),
-        format!(
-            "5 0 obj\n<< /Length {} >>\nstream\n{}endstream\nendobj\n",
-            content.len(),
-            content
-        ),
-    ];
-
-    let mut pdf = String::from("%PDF-1.4\n");
-    let mut offsets = Vec::with_capacity(objects.len());
-    for object in &objects {
-        offsets.push(pdf.len());
-        pdf.push_str(object);
-    }
-    let xref_start = pdf.len();
-    pdf.push_str("xref\n0 6\n0000000000 65535 f \n");
-    for offset in offsets {
-        pdf.push_str(&format!("{offset:010} 00000 n \n"));
-    }
-    pdf.push_str("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n");
-    pdf.push_str(&xref_start.to_string());
-    pdf.push_str("\n%%EOF\n");
-    pdf.into_bytes()
-}
-
-fn escape_pdf_text(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('(', "\\(")
-        .replace(')', "\\)")
 }
 
 #[cfg(test)]
@@ -198,6 +194,44 @@ mod tests {
         export_pdf(&report, &pdf).unwrap();
 
         assert!(std::fs::metadata(xlsx).unwrap().len() > 0);
-        assert!(std::fs::read(pdf).unwrap().starts_with(b"%PDF-1.4"));
+        let pdf = std::fs::read_to_string(pdf).unwrap();
+        assert!(pdf.starts_with("%PDF-1.4"));
+        assert!(pdf.contains("Usage source: test double"));
+        assert!(pdf.contains("Unknown: No applicable price"));
+    }
+
+    #[test]
+    fn report_builder_applies_half_open_dates_to_usage_and_costs() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let end = now + chrono::Duration::hours(1);
+        let event = UsageEvent {
+            tool_id: "codex".into(),
+            occurred_at: now,
+            model_name: None,
+            input_tokens: 1,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: 1,
+            source: SourceMeta::local("test event", now),
+        };
+        let events = [
+            event.clone(),
+            UsageEvent {
+                occurred_at: end,
+                ..event
+            },
+        ];
+        let report = build_usage_report(
+            ReportRequest {
+                starts_at: now,
+                ends_at: end,
+                currency: " eur ".into(),
+            },
+            &events,
+        );
+        assert_eq!(report.request.currency, "EUR");
+        assert_eq!(report.rows[0].total_tokens, 1);
+        assert!(report.costs.contains_key("codex"));
     }
 }

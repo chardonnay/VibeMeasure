@@ -37,9 +37,9 @@ All required tools are present in the catalog:
 - DeepSeek TUI
 - MiniMAX
 
-Only Codex CLI has an implemented local parser in this initial slice because local `token_count` events were verified. Other providers remain manual or adapter-pending until their data source is proven.
+The Rust CLI imports Codex session logs into SQLite. Re-importing an unchanged session leaves the recorded totals unchanged. On macOS, four local readers collect Claude Code, Codex CLI, Gemini CLI, and MiniMAX data. The other thirteen catalog entries support manual configuration. The adapter guide describes the data each reader can supply and how to enable Claude's weekly quota capture.
 
-On macOS, an enabled Codex provider with data source `Local adapter` reads the latest local Codex CLI `token_count` events from `~/.codex/sessions` on a configurable provider pull interval. The default interval is 5 minutes. The Refresh button still performs a manual pull.
+The macOS app polls enabled local readers in the background. The default interval is five minutes and can be configured per provider. Windows, GNOME, and Plasma display snapshots from an existing CLI database. The macOS app can publish enabled provider windows to its bundled WidgetKit extension.
 
 ## Display Modes
 
@@ -50,7 +50,7 @@ The default first-run view is `Provider cycles`, but all built-in LLM providers 
 - `1 week`: compares all providers across the current UTC week.
 - `1 month`: compares all providers across the current UTC calendar month.
 
-If a provider's limit, reset time, tariff, or model name is not verified, VibeMeasure shows a manual setup state instead of guessing.
+Claude quota windows in VibeMeasure are weekly. The comparison modes count dated token events within their respective periods. A provider quota percentage and a calendar period’s token consumption are separate measurements. The app shows unavailable values with a dash.
 
 ## Quick Start
 

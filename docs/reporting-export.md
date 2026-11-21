@@ -9,18 +9,16 @@ Reports summarize token usage and cost status over a selected period.
 - Current year.
 - Custom date range.
 
-The CLI already supports custom start and end timestamps. Native UIs will map dropdown selections to these ranges.
-
-macOS status: the menu-bar app opens a native Reports window from the Usage footer. It can export the currently visible live/manual snapshot to `.xlsx` and `.pdf`. Historical native aggregation over the selected period starts after the macOS app writes usage events to the shared SQLite store.
+The CLI queries events between the inclusive start and exclusive end timestamps. macOS supports a current snapshot and dated reports. Historical reports aggregate recorded local token events from enabled providers, or imported events from a VibeMeasure SQLite database selected in the report window. Each report uses one source. Weeks start Monday UTC and custom ranges include the entire selected end date in UTC. Providers with no dated events in the period have no historical total. Manual quota percentages remain available in the snapshot.
 
 ## Exports
 
 - CLI `.xlsx`: generated with `rust_xlsxwriter`.
-- macOS snapshot `.xlsx`: generated as an open OOXML workbook.
+- macOS `.xlsx`: generated as an open OOXML workbook.
 - CLI `.pdf`: generated as a simple open PDF document.
-- macOS snapshot `.pdf`: rendered as a styled native report with header, summary cards, and table layout.
+- macOS `.pdf`: rendered as a styled native report with header, summary cards, and table layout.
 
-Exports include token counts and source notes. Costs are omitted unless provider-reported cost, verified pricing, or manual pricing exists.
+Exports include token counts and source notes. CLI reports label calculable prices as estimates and include their sources. See [Pricing and Currency](pricing-currency.md) for units, conversion and missing-price behavior.
 
 Validation:
 

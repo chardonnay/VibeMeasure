@@ -880,6 +880,7 @@ dependencies = [
  "chrono",
  "clap",
  "serde_json",
+ "tempfile",
  "vibemeasure-core",
 ]
 

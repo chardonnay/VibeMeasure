@@ -1,90 +1,109 @@
-import WidgetKit
+import Foundation
 import SwiftUI
+import WidgetKit
 
-struct VibeMeasureEntry: TimelineEntry {
-    let date: Date
-    let providers: [WidgetProviderPreview]
+private struct PublishedSnapshot: Decodable {
+    let generatedAt: String
+    let providers: [PublishedProvider]
+
+    enum CodingKeys: String, CodingKey {
+        case generatedAt = "generated_at"
+        case providers
+    }
 }
 
-struct VibeMeasureTimelineProvider: TimelineProvider {
+private struct PublishedProvider: Decodable {
+    let display_name: String
+    let rows: [String]
+}
+
+private struct VibeMeasureEntry: TimelineEntry {
+    let date: Date
+    var snapshotDate: Date?
+    var providers: [PublishedProvider] = []
+    var message: String?
+}
+
+private struct VibeMeasureTimelineProvider: TimelineProvider {
     func placeholder(in context: Context) -> VibeMeasureEntry {
-        VibeMeasureEntry(date: Date(), providers: WidgetProviderPreview.samples)
+        VibeMeasureEntry(date: Date(), message: "VibeMeasure usage")
     }
 
     func getSnapshot(in context: Context, completion: @escaping (VibeMeasureEntry) -> Void) {
-        completion(VibeMeasureEntry(date: Date(), providers: WidgetProviderPreview.samples))
+        completion(readSnapshot())
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<VibeMeasureEntry>) -> Void) {
-        let entry = VibeMeasureEntry(date: Date(), providers: WidgetProviderPreview.samples)
-        completion(Timeline(entries: [entry], policy: .after(Date().addingTimeInterval(300))))
+        let entry = readSnapshot()
+        completion(Timeline(entries: [entry], policy: .after(entry.date.addingTimeInterval(300))))
+    }
+
+    private func readSnapshot() -> VibeMeasureEntry {
+        let now = Date()
+        let group = Bundle.main.object(forInfoDictionaryKey: "VibeMeasureAppGroup") as? String
+            ?? "group.org.vibemeasure.shared"
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group) else {
+            return VibeMeasureEntry(date: now, message: "The shared VibeMeasure container is unavailable.")
+        }
+        do {
+            let data = try Data(contentsOf: container.appendingPathComponent("widget.json"))
+            let snapshot = try JSONDecoder().decode(PublishedSnapshot.self, from: data)
+            let formatter = ISO8601DateFormatter()
+            let wholeSeconds = formatter.date(from: snapshot.generatedAt)
+            formatter.formatOptions.insert(.withFractionalSeconds)
+            guard let updated = wholeSeconds ?? formatter.date(from: snapshot.generatedAt) else {
+                return VibeMeasureEntry(date: now, message: "The snapshot date is invalid.")
+            }
+            return VibeMeasureEntry(date: now, snapshotDate: updated, providers: snapshot.providers,
+                                    message: snapshot.providers.isEmpty ? "Enable a provider in VibeMeasure Settings." : nil)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return VibeMeasureEntry(date: now, message: "Open VibeMeasure to publish a usage snapshot.")
+        } catch {
+            return VibeMeasureEntry(date: now, message: "The usage snapshot could not be read.")
+        }
     }
 }
 
-struct VibeMeasureWidgetView: View {
+private struct VibeMeasureWidgetView: View {
     let entry: VibeMeasureEntry
-
     var body: some View {
-        Group {
-            if entry.providers.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("VibeMeasure")
-                        .font(.headline)
-                    Text("No providers enabled")
-                        .font(.caption.weight(.semibold))
-                    Text("Open Settings to activate the LLM providers you want shown here.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text("VibeMeasure").font(.headline)
+                Spacer()
+                if let updated = entry.snapshotDate {
+                    Text(updated, style: .relative).font(.caption).foregroundStyle(.secondary)
+                        .accessibilityLabel("Snapshot age: \(updated.formatted())")
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            }
+            if let message = entry.message {
+                Text(message).font(.caption)
             } else {
-                HStack(spacing: 14) {
-                    ForEach(entry.providers) { provider in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(provider.name)
-                                .font(.caption.weight(.bold))
-                            HStack {
-                                Text(provider.window)
-                                Spacer()
-                                Text(provider.percent)
-                                    .foregroundStyle(.green)
-                                    .fontWeight(.bold)
-                            }
-                            ProgressView(value: provider.value)
-                                .tint(.green)
-                            Text(provider.note)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
+                ForEach(Array(entry.providers.prefix(3).enumerated()), id: \.offset) { _, provider in
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(provider.display_name).font(.caption.bold())
+                        Text(provider.rows.isEmpty ? "Usage unavailable" : provider.rows.joined(separator: " · "))
+                            .font(.caption2).lineLimit(2)
                     }
+                }
+                if entry.providers.count > 3 {
+                    Text("+\(entry.providers.count - 3) more in VibeMeasure").font(.caption2)
                 }
             }
         }
-        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .containerBackground(.fill.tertiary, for: .widget)
     }
 }
 
 @main
 struct VibeMeasureWidget: Widget {
-    let kind = "VibeMeasureWidget"
-
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: VibeMeasureTimelineProvider()) { entry in
-            VibeMeasureWidgetView(entry: entry)
+        StaticConfiguration(kind: "VibeMeasureWidget", provider: VibeMeasureTimelineProvider()) {
+            VibeMeasureWidgetView(entry: $0)
         }
         .configurationDisplayName("VibeMeasure")
-        .description("Shows selected provider usage windows from verified or manual data.")
-        .supportedFamilies([.systemMedium])
+        .description("Shows the latest snapshot of your enabled providers.")
+        .supportedFamilies([.systemMedium, .systemLarge])
     }
-}
-
-struct WidgetProviderPreview: Identifiable {
-    let id: String
-    let name: String
-    let window: String
-    let percent: String
-    let value: Double
-    let note: String
-
-    static let samples: [WidgetProviderPreview] = []
 }

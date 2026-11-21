@@ -50,6 +50,15 @@ pub fn parse_ecb_daily_rates(xml: &str, fetched_at: DateTime<Utc>) -> Result<Vec
                 }
 
                 if let (Some(currency), Some(rate)) = (currency, rate) {
+                    if currency.len() != 3
+                        || !currency.bytes().all(|ch| ch.is_ascii_uppercase())
+                        || !rate.is_finite()
+                        || rate <= 0.0
+                    {
+                        return Err(VibeError::InvalidData(
+                            "invalid ECB currency or exchange rate".into(),
+                        ));
+                    }
                     rates.push(CurrencyRate {
                         base_currency: "EUR".to_string(),
                         quote_currency: currency,
@@ -68,6 +77,11 @@ pub fn parse_ecb_daily_rates(xml: &str, fetched_at: DateTime<Utc>) -> Result<Vec
         }
     }
 
+    if rates.is_empty() {
+        return Err(VibeError::InvalidData(
+            "ECB response contains no exchange rates".into(),
+        ));
+    }
     Ok(rates)
 }
 
@@ -98,5 +112,16 @@ mod tests {
         assert_eq!(rates[0].base_currency, "EUR");
         assert_eq!(rates[0].quote_currency, "USD");
         assert_eq!(rates[0].rate, 1.1234);
+    }
+
+    #[test]
+    fn rejects_empty_or_unusable_rates() {
+        for xml in [
+            r#"<html/>"#,
+            r#"<Cube currency="USD" rate="0"/>"#,
+            r#"<Cube currency="GBP" rate="NaN"/>"#,
+        ] {
+            assert!(parse_ecb_daily_rates(xml, Utc::now()).is_err());
+        }
     }
 }

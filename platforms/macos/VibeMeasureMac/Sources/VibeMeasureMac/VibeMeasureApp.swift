@@ -19,7 +19,6 @@ private enum AppWindows {
 @main
 struct VibeMeasureApp: App {
     @AppStorage("displayMode") private var displayMode = DisplayMode.providerCycles.rawValue
-    @AppStorage("launchAtLogin") private var launchAtLogin = false
     @AppStorage("usagePopoverHeight") private var usagePopoverHeight = 620.0
     @StateObject private var appModel = VibeMeasureAppModel()
 
@@ -40,7 +39,6 @@ struct VibeMeasureApp: App {
         Settings {
             SettingsView(
                 displayMode: $displayMode,
-                launchAtLogin: $launchAtLogin,
                 usagePopoverHeight: $usagePopoverHeight,
                 providerStore: appModel.providerStore
             )
@@ -236,6 +234,12 @@ final class VibeMeasureAppModel: ObservableObject {
                 usageStore?.configure(providers: providers)
             }
             .store(in: &cancellables)
+
+        providerStore.$providers.combineLatest(usageStore.$liveUsageByProvider)
+            .sink { providers, readings in
+                WidgetSnapshotWriter.publish(providers: providers, readings: readings)
+            }
+            .store(in: &cancellables)
     }
 }
 
@@ -249,8 +253,8 @@ final class UsageRefreshStore: ObservableObject {
     private var providers: [ProviderSettings] = []
     private var errorsByProvider: [String: String] = [:]
     private var pollingTask: Task<Void, Never>?
-    private var pendingRefresh = false
-    private var pendingForcedRefresh = false
+    private var inFlight: [String: UUID] = [:]
+    private var repeatAfterPull: Set<String> = []
 
     init() {
         pollingTask = Task { @MainActor [weak self] in
@@ -279,75 +283,70 @@ final class UsageRefreshStore: ObservableObject {
     }
 
     private func synchronizeConfiguredProviders(_ providers: [ProviderSettings]) {
+        let previous = self.providers
         self.providers = providers
-
-        let liveProviderIDs = Set(providers.filter(\.canReadLiveUsage).map(\.id))
-        liveUsageByProvider = liveUsageByProvider.filter { liveProviderIDs.contains($0.key) }
-        lastPulledAtByProvider = lastPulledAtByProvider.filter { liveProviderIDs.contains($0.key) }
-        errorsByProvider = errorsByProvider.filter { liveProviderIDs.contains($0.key) }
+        // Poll intervals and labels can change without invalidating a reading.
+        let retainedIDs = Set(providers.filter { provider in
+            provider.canReadLiveUsage && previous.contains {
+                $0.id == provider.id && $0.canReadLiveUsage && $0.commandHint == provider.commandHint
+            }
+        }.map(\.id))
+        inFlight = inFlight.filter { retainedIDs.contains($0.key) }
+        repeatAfterPull.formIntersection(retainedIDs)
+        liveUsageByProvider = liveUsageByProvider.filter { retainedIDs.contains($0.key) }
+        lastPulledAtByProvider = lastPulledAtByProvider.filter { retainedIDs.contains($0.key) }
+        errorsByProvider = errorsByProvider.filter { retainedIDs.contains($0.key) }
+        isRefreshing = !inFlight.isEmpty
         updateRefreshError()
     }
 
     private func pullDueProviders(force: Bool = false, now: Date = Date()) {
-        if isRefreshing {
-            pendingRefresh = true
-            pendingForcedRefresh = pendingForcedRefresh || force
-            return
-        }
-
-        let dueProviders = providers.filter { provider in
-            shouldPull(provider: provider, now: now, force: force)
-        }
-        guard !dueProviders.isEmpty else {
-            return
-        }
-
-        isRefreshing = true
-        for provider in dueProviders {
-            pull(provider: provider, now: now)
-        }
-        isRefreshing = false
-        updateRefreshError()
-
-        if pendingRefresh {
-            let shouldForce = pendingForcedRefresh
-            pendingRefresh = false
-            pendingForcedRefresh = false
-            pullDueProviders(force: shouldForce, now: Date())
-        }
-    }
-
-    private func shouldPull(provider: ProviderSettings, now: Date, force: Bool) -> Bool {
-        guard provider.canReadLiveUsage else {
-            return false
-        }
-
-        if force || lastPulledAtByProvider[provider.id] == nil {
-            return true
-        }
-
-        let interval = TimeInterval(max(provider.pollIntervalMinutes, 1) * 60)
-        return now.timeIntervalSince(lastPulledAtByProvider[provider.id] ?? .distantPast) >= interval
-    }
-
-    private func pull(provider: ProviderSettings, now: Date) {
-        do {
-            if let usage = try readUsage(for: provider) {
-                liveUsageByProvider[provider.id] = usage
-                errorsByProvider.removeValue(forKey: provider.id)
-            } else {
-                liveUsageByProvider.removeValue(forKey: provider.id)
-                errorsByProvider[provider.id] = "No live usage data found for \(provider.displayName)."
+        for provider in providers where provider.canReadLiveUsage {
+            if inFlight[provider.id] != nil {
+                if force { repeatAfterPull.insert(provider.id) }
+                continue
             }
-            lastPulledAtByProvider[provider.id] = now
-        } catch {
+            let interval = TimeInterval(max(provider.pollIntervalMinutes, 1)) * 60
+            if force || now.timeIntervalSince(lastPulledAtByProvider[provider.id] ?? .distantPast) >= interval {
+                startPull(provider)
+            }
+        }
+    }
+
+    private func startPull(_ provider: ProviderSettings) {
+        let requestID = UUID()
+        inFlight[provider.id] = requestID
+        isRefreshing = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = Result { try Self.readUsage(for: provider) }
+            Task { @MainActor [weak self] in
+                self?.finishPull(provider: provider, requestID: requestID, result: result)
+            }
+        }
+    }
+
+    private func finishPull(provider: ProviderSettings, requestID: UUID, result: Result<ProviderLiveUsage?, Error>) {
+        guard inFlight[provider.id] == requestID else { return }
+        inFlight.removeValue(forKey: provider.id)
+        switch result {
+        case let .success(usage):
+            liveUsageByProvider[provider.id] = usage
+            errorsByProvider[provider.id] = usage == nil ? "No live usage data found for \(provider.displayName)." : nil
+        case let .failure(error):
             liveUsageByProvider.removeValue(forKey: provider.id)
             errorsByProvider[provider.id] = "\(provider.displayName) live usage could not be read: \(error.localizedDescription)"
-            lastPulledAtByProvider[provider.id] = now
+        }
+        lastPulledAtByProvider[provider.id] = Date()
+        updateRefreshError()
+
+        if repeatAfterPull.remove(provider.id) != nil {
+            startPull(provider)
+        } else {
+            isRefreshing = !inFlight.isEmpty
         }
     }
 
-    private func readUsage(for provider: ProviderSettings) throws -> ProviderLiveUsage? {
+    private nonisolated static func readUsage(for provider: ProviderSettings) throws -> ProviderLiveUsage? {
         switch provider.id {
         case "claude":
             try ClaudeCodeUsageReader().readLatestUsage()
@@ -383,7 +382,7 @@ struct UsagePopover: View {
                     settings: provider,
                     liveUsage: usageStore.liveUsageByProvider[provider.id]
                 )
-                .applying(displayMode: displayMode)
+                .applying(displayMode: displayMode, history: usageStore.liveUsageByProvider[provider.id]?.tokenHistory ?? [])
             }
     }
 
@@ -536,8 +535,10 @@ struct ProviderSection: View {
                             .font(.body.weight(.bold))
                             .foregroundStyle(.green)
                     }
-                    ProgressView(value: window.percent)
-                        .tint(.green)
+                    if window.hasKnownPercent {
+                        ProgressView(value: window.percent)
+                            .tint(.green)
+                    }
                     Text(window.resetText)
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -548,6 +549,7 @@ struct ProviderSection: View {
 }
 
 enum ReportPeriod: String, CaseIterable, Identifiable {
+    case snapshot = "Current snapshot"
     case currentWeek = "Current week"
     case currentMonth = "Current month"
     case currentYear = "Current year"
@@ -557,6 +559,8 @@ enum ReportPeriod: String, CaseIterable, Identifiable {
 
     var fileNameComponent: String {
         switch self {
+        case .snapshot:
+            "snapshot"
         case .currentWeek:
             "current-week"
         case .currentMonth:
@@ -572,26 +576,81 @@ enum ReportPeriod: String, CaseIterable, Identifiable {
 struct ReportsView: View {
     @ObservedObject var providerStore: ProviderSettingsStore
     @ObservedObject var usageStore: UsageRefreshStore
-    @State private var period = ReportPeriod.currentWeek
+    @State private var period = ReportPeriod.snapshot
     @State private var customStartDate = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
     @State private var customEndDate = Date()
     @State private var exportStatus: String?
     @State private var exportError: String?
 
+    @State private var databaseURL: URL?
+    @State private var databaseRevision = 0
+    @State private var loadedQuery: ImportedUsageQuery?
+    @State private var imported: [String: TokenPeriodSummary] = [:]
+    @State private var databaseError: String?
+
+    private var dateRange: Range<Date>? {
+        UsagePeriods.range(period, at: Date(), from: customStartDate, through: customEndDate)
+    }
+
+    private var databaseQuery: ImportedUsageQuery? {
+        guard let url = databaseURL, let range = dateRange else { return nil }
+        return ImportedUsageQuery(url: url, range: range, revision: databaseRevision)
+    }
+
     private var rows: [ReportSnapshotRow] {
-        providerStore.providers
-            .filter(\.isEnabled)
-            .flatMap { provider in
-                ProviderPreview(
-                    settings: provider,
-                    liveUsage: usageStore.liveUsageByProvider[provider.id]
-                )
-                .reportRows()
+        let providers = providerStore.providers.filter(\.isEnabled)
+        if period == .snapshot {
+            return providers.flatMap { provider in
+                ProviderPreview(settings: provider, liveUsage: usageStore.liveUsageByProvider[provider.id]).reportRows()
             }
+        }
+        guard let range = dateRange else { return [] }
+        if let query = databaseQuery, loadedQuery != query { return [] }
+        return providers.compactMap { provider in
+            let summary = databaseURL != nil
+                ? imported[provider.id]
+                : TokenPeriodSummary.summarize(usageStore.liveUsageByProvider[provider.id]?.tokenHistory ?? [], in: range)
+            guard let summary else { return nil }
+            return ReportSnapshotRow(providerName: provider.displayName, planName: "—",
+                                     windowName: "Recorded tokens", percentText: summary.tokens.formatted(),
+                                     source: databaseURL == nil ? "Session logs" : "SQLite",
+                                     notes: "\(summary.count) events")
+        }
+    }
+
+    @MainActor
+    private func loadDatabase(_ query: ImportedUsageQuery?) async {
+        databaseError = nil
+        loadedQuery = nil
+        imported = [:]
+        guard let query else { return }
+        do {
+            let result = try await Task.detached(priority: .utility) { try query.read() }.value
+            guard !Task.isCancelled else { return }
+            imported = result
+            loadedQuery = query
+        } catch {
+            guard !Task.isCancelled else { return }
+            databaseError = error.localizedDescription
+        }
+    }
+
+    private func chooseDatabase() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use database"
+        if panel.runModal() == .OK, let url = panel.url {
+            databaseURL = url
+            databaseRevision += 1
+        }
     }
 
     private var periodLabel: String {
-        switch period {
+        let format = Date.FormatStyle(date: .abbreviated, time: .omitted, timeZone: UsagePeriods.utc.timeZone)
+        return switch period {
+        case .snapshot:
+            "Current snapshot"
         case .currentWeek:
             "Current week"
         case .currentMonth:
@@ -599,7 +658,7 @@ struct ReportsView: View {
         case .currentYear:
             "Current year"
         case .custom:
-            "\(customStartDate.formatted(date: .abbreviated, time: .omitted)) - \(customEndDate.formatted(date: .abbreviated, time: .omitted))"
+            "\(customStartDate.formatted(format)) – \(customEndDate.formatted(format)) UTC"
         }
     }
 
@@ -614,6 +673,8 @@ struct ReportsView: View {
             footer
         }
         .frame(minWidth: 820, minHeight: 560)
+        .task(id: databaseQuery) { await loadDatabase(databaseQuery) }
+        .environment(\.timeZone, UsagePeriods.utc.timeZone)
     }
 
     private var header: some View {
@@ -629,6 +690,7 @@ struct ReportsView: View {
             }
             Spacer()
             Button {
+                databaseRevision += 1
                 usageStore.pullNow(providers: providerStore.providers)
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
@@ -653,9 +715,19 @@ struct ReportsView: View {
                 }
             }
 
-            Text("The macOS app currently shows the latest live/manual snapshot. Historical XLSX/PDF export requires persisted SQLite usage events.")
+            if period != .snapshot {
+                HStack {
+                    Text(databaseURL?.lastPathComponent ?? "Source: available local session logs")
+                    Button("Choose VibeMeasure database…") { chooseDatabase() }
+                    if databaseURL != nil {
+                        Button("Use session logs") { databaseURL = nil }
+                    }
+                }
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                if let databaseError {
+                    Text(databaseError).foregroundStyle(.red)
+                }
+            }
             if let exportStatus {
                 Text(exportStatus)
                     .font(.caption)
@@ -676,7 +748,10 @@ struct ReportsView: View {
             ContentUnavailableView(
                 "No report data",
                 systemImage: "chart.bar.doc.horizontal",
-                description: Text("Enable a provider or add manual windows in Settings.")
+                description: Text(period == .snapshot
+                    ? "Enable a provider in Settings."
+                    : (dateRange == nil ? "Choose an end date on or after the start date."
+                                        : "No recorded token events for enabled providers in this period."))
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
@@ -693,7 +768,7 @@ struct ReportsView: View {
 
     private var footer: some View {
         HStack {
-            Text("Exports contain the current snapshot. Historical aggregation starts after SQLite event persistence is connected.")
+            Text(period == .snapshot ? "Current provider windows" : "Recorded token events in the selected UTC period")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -725,7 +800,8 @@ struct ReportsView: View {
         let report = SnapshotReport(
             periodLabel: periodLabel,
             generatedAt: Date(),
-            rows: rows
+            rows: rows,
+            isSnapshot: period == .snapshot
         )
 
         do {
@@ -750,9 +826,9 @@ struct ReportSnapshotRow: Identifiable {
 }
 
 private extension ReportSnapshotRow {
-    var usageFraction: Double {
-        let rawValue = percentText.replacingOccurrences(of: "%", with: "")
-        return min(max((Double(rawValue) ?? 0) / 100, 0), 1)
+    var usageFraction: Double? {
+        guard percentText.hasSuffix("%"), let value = Double(percentText.dropLast()), value.isFinite else { return nil }
+        return min(max(value / 100, 0), 1)
     }
 }
 
@@ -774,15 +850,18 @@ struct SnapshotReport {
     let periodLabel: String
     let generatedAt: Date
     let rows: [ReportSnapshotRow]
+    var isSnapshot = true
+
+    var scope: String {
+        isSnapshot ? "Current provider windows" : "Recorded token usage in the selected UTC period"
+    }
 }
 
 private extension SnapshotReport {
     var averageUsagePercentText: String {
-        guard !rows.isEmpty else {
-            return "0%"
-        }
-
-        let average = rows.map(\.usageFraction).reduce(0, +) / Double(rows.count)
+        let values = rows.compactMap(\.usageFraction)
+        guard !values.isEmpty else { return "—" }
+        let average = values.reduce(0, +) / Double(values.count)
         return "\(Int((average * 100).rounded()))%"
     }
 }
@@ -827,24 +906,24 @@ struct SnapshotReportExporter {
         try writeXML(workbookRelationshipsXML, to: temporaryRoot.appendingPathComponent("xl/_rels/workbook.xml.rels"))
         try writeXML(worksheetXML(for: report), to: temporaryRoot.appendingPathComponent("xl/worksheets/sheet1.xml"))
 
-        if fileManager.fileExists(atPath: url.path) {
-            try fileManager.removeItem(at: url)
-        }
-
+        let archive = fileManager.temporaryDirectory.appendingPathComponent("VibeMeasure-\(UUID().uuidString).zip")
+        defer { try? fileManager.removeItem(at: archive) }
         let process = Process()
         let standardError = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
         process.currentDirectoryURL = temporaryRoot
-        process.arguments = ["-q", "-r", url.path, "."]
+        process.arguments = ["-q", "-r", archive.path, "."]
         process.standardError = standardError
         try process.run()
+        let errorOutput = standardError.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
 
         guard process.terminationStatus == 0 else {
-            let stderr = String(data: standardError.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+            let stderr = String(data: errorOutput, encoding: .utf8)
                 ?? "zip exited with code \(process.terminationStatus)"
             throw ReportExportError.zipFailed(stderr)
         }
+        try Data(contentsOf: archive, options: .mappedIfSafe).write(to: url, options: .atomic)
     }
 
     private static func writePDF(_ report: SnapshotReport, to url: URL) throws {
@@ -1005,7 +1084,7 @@ struct DesignedPDFReportRenderer {
         }
 
         drawTable(rows: rows, top: tableTop)
-        drawFooter(pageNumber: pageNumber)
+        drawFooter(scope: report.scope)
     }
 
     private static func drawBackground() {
@@ -1048,7 +1127,7 @@ struct DesignedPDFReportRenderer {
             color: .white
         )
         drawText(
-            "\(report.periodLabel) | Snapshot export",
+            report.periodLabel,
             in: CGRect(x: margin + 40, y: pageSize.height - margin - 64, width: 330, height: 18),
             font: .systemFont(ofSize: 11, weight: .medium),
             color: NSColor(calibratedWhite: 0.82, alpha: 1)
@@ -1071,11 +1150,11 @@ struct DesignedPDFReportRenderer {
 
     private static func drawSummaryCards(report: SnapshotReport, top: CGFloat) {
         let cardWidth = (pageSize.width - margin * 2 - 20) / 3
-        let averageUsage = report.averageUsagePercentText
         let cards = [
             ("Providers", "\(Set(report.rows.map(\.providerName)).count)", "Enabled in report"),
-            ("Windows", "\(report.rows.count)", "Visible usage windows"),
-            ("Avg. Usage", averageUsage, "Snapshot only")
+            ("Rows", "\(report.rows.count)", report.isSnapshot ? "Provider windows" : "Provider totals"),
+            report.isSnapshot ? ("Avg. Usage", report.averageUsagePercentText, "Reported percentages")
+                              : ("Time zone", "UTC", "Event timestamps")
         ]
 
         for (index, card) in cards.enumerated() {
@@ -1155,11 +1234,15 @@ struct DesignedPDFReportRenderer {
     }
 
     private static func drawUsageCell(row: ReportSnapshotRow, in rect: CGRect) {
+        guard let fraction = row.usageFraction else {
+            drawText(row.percentText, in: rect, font: .systemFont(ofSize: 9), color: .black)
+            return
+        }
         let barRect = CGRect(x: rect.minX, y: rect.minY + 1, width: 44, height: 8)
         NSColor(calibratedWhite: 0.88, alpha: 1).setFill()
         roundedRect(x: barRect.minX, y: barRect.minY, width: barRect.width, height: barRect.height, radius: 4).fill()
 
-        let fillWidth = barRect.width * CGFloat(row.usageFraction)
+        let fillWidth = barRect.width * CGFloat(fraction)
         NSColor(calibratedRed: 0.15, green: 0.82, blue: 0.39, alpha: 1).setFill()
         roundedRect(x: barRect.minX, y: barRect.minY, width: fillWidth, height: barRect.height, radius: 4).fill()
 
@@ -1171,14 +1254,14 @@ struct DesignedPDFReportRenderer {
         )
     }
 
-    private static func drawFooter(pageNumber: Int) {
+    private static func drawFooter(scope: String) {
         NSColor(calibratedWhite: 0.84, alpha: 1).setStroke()
         NSBezierPath.strokeLine(
             from: CGPoint(x: margin, y: margin - 2),
             to: CGPoint(x: pageSize.width - margin, y: margin - 2)
         )
         drawText(
-            "Snapshot export. Historical aggregation begins after SQLite event persistence is connected.",
+            scope,
             in: CGRect(x: margin, y: margin - 25, width: pageSize.width - margin * 2, height: 14),
             font: .systemFont(ofSize: 8.5, weight: .regular),
             color: NSColor(calibratedWhite: 0.46, alpha: 1)
@@ -1216,7 +1299,7 @@ private extension SnapshotReport {
             ["VibeMeasure Report"],
             ["Generated", generatedAt.formatted(date: .abbreviated, time: .standard)],
             ["Period", periodLabel],
-            ["Scope", "Latest snapshot export. Historical aggregation starts after SQLite event persistence is connected."],
+            ["Scope", scope],
             [],
             ["Provider", "Plan", "Window", "Usage", "Source", "Notes"]
         ] + rows.map { row in
@@ -1228,7 +1311,6 @@ private extension SnapshotReport {
 
 struct SettingsView: View {
     @Binding var displayMode: String
-    @Binding var launchAtLogin: Bool
     @Binding var usagePopoverHeight: Double
     @ObservedObject var providerStore: ProviderSettingsStore
     @State private var selectedProviderID: String?
@@ -1258,7 +1340,7 @@ struct SettingsView: View {
                     )
                     .frame(width: 140)
                 }
-                Toggle("Launch at Login", isOn: $launchAtLogin)
+                LaunchAtLoginSetting()
             }
             .padding()
 
@@ -1342,6 +1424,7 @@ struct ProviderPreview: Identifiable {
         id = settings.id
         name = settings.displayName
         let configuredPlanName = settings.planName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let liveUsage = settings.dataSource == .localAdapter ? liveUsage : nil
         let livePlanName = liveUsage?.planName?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let livePlanName, !livePlanName.isEmpty {
             planName = livePlanName
@@ -1353,22 +1436,17 @@ struct ProviderPreview: Identifiable {
             status = liveUsage.status
             statusColor = liveUsage.statusColor
             windows = liveUsage.windows
-        } else if settings.dataSource == .localAdapter && !settings.hasVerifiedLocalAdapter {
-            status = "No adapter"
+        } else if !settings.visibleManualWindows.isEmpty {
+            status = "Manual"
             statusColor = .orange
-            windows = [
-                WindowPreview(
-                    name: "Usage unavailable",
-                    percent: 0,
-                    resetText: "No verified local usage source is implemented for \(settings.displayName)"
-                )
-            ]
+            windows = settings.visibleManualWindows.map(WindowPreview.init(window:))
         } else {
-            status = settings.dataSource.shortLabel
-            statusColor = settings.dataSource.color
-            windows = settings.manualWindows.isEmpty
-                ? [WindowPreview(name: "Manual setup required", percent: 0, resetText: "No limits are guessed")]
-                : settings.manualWindows.map(WindowPreview.init(window:))
+            status = "Unavailable"
+            statusColor = .secondary
+            windows = [WindowPreview(name: "Usage unavailable", percent: nil,
+                                     resetText: settings.canReadLiveUsage
+                                         ? "Waiting for provider data"
+                                         : "No recorded usage or manual windows")]
         }
     }
 
@@ -1390,26 +1468,19 @@ struct ProviderPreview: Identifiable {
         self.windows = windows
     }
 
-    func applying(displayMode: DisplayMode) -> ProviderPreview {
-        guard displayMode != .providerCycles else {
-            return self
-        }
-
-        let matchingWindows = windows.filter { window in
-            window.matches(displayMode: displayMode)
-        }
-
-        return ProviderPreview(
-            id: id,
-            name: name,
-            planName: planName,
-            symbol: symbol,
-            status: status,
-            statusColor: statusColor,
-            windows: matchingWindows.isEmpty
-                ? [WindowPreview.manualSetupRequired(for: displayMode)]
-                : matchingWindows
+    func applying(displayMode: DisplayMode, history: [RecordedTokenUsage], now: Date = Date()) -> ProviderPreview {
+        guard let range = UsagePeriods.range(displayMode, at: now) else { return self }
+        let summary = TokenPeriodSummary.summarize(history, in: range)
+        let window = WindowPreview(
+            name: "Recorded tokens",
+            percent: nil,
+            resetText: summary.map { "\($0.count) recorded events · \(displayMode.windowTitle) (UTC)" }
+                ?? "No token events recorded in this period",
+            valueText: summary.map { $0.tokens.formatted() }
         )
+        return ProviderPreview(id: id, name: name, planName: planName, symbol: symbol,
+                               status: summary == nil ? "Unavailable" : "Local",
+                               statusColor: summary == nil ? .secondary : .green, windows: [window])
     }
 
     func reportRows() -> [ReportSnapshotRow] {
@@ -1432,51 +1503,48 @@ struct WindowPreview: Identifiable {
     let percent: Double
     let resetText: String
     let displayModes: Set<DisplayMode>
+    let hasKnownPercent: Bool
+    let valueText: String?
 
     var percentText: String {
-        "\(Int(percent * 100))%"
+        valueText ?? (hasKnownPercent ? "\(Int((percent * 100).rounded()))%" : "—")
     }
 
     init(
         name: String,
-        percent: Double,
+        percent: Double?,
         resetText: String,
-        displayModes: Set<DisplayMode> = []
+        displayModes: Set<DisplayMode> = [],
+        valueText: String? = nil
     ) {
         self.name = name
-        self.percent = percent
+        let fraction = percent.flatMap { $0.isFinite ? min(max($0, 0), 1) : nil }
+        self.percent = fraction ?? 0
+        self.hasKnownPercent = fraction != nil
+        self.valueText = valueText
         self.resetText = resetText
         self.displayModes = displayModes
     }
 
     init(window: ManualUsageWindow) {
-        name = window.label.isEmpty ? window.kind.rawValue : window.label
-        percent = min(max(window.usedPercent / 100, 0), 1)
-        resetText = window.resetNote.isEmpty ? "Manual window" : window.resetNote
-        displayModes = window.kind.displayModes
+        self.init(name: window.label.isEmpty ? window.kind.rawValue : window.label,
+                  percent: window.usedPercent / 100,
+                  resetText: window.resetNote.isEmpty ? "Manual window" : window.resetNote,
+                  displayModes: window.kind.displayModes)
     }
 
     init(codexWindow: CodexRateLimitWindow, now: Date = Date()) {
         let resetsAt = Date(timeIntervalSince1970: codexWindow.resetsAt)
         let hasReset = resetsAt <= now
 
-        name = Self.codexWindowName(minutes: codexWindow.windowMinutes)
-        percent = hasReset ? 0 : min(max(codexWindow.usedPercent / 100, 0), 1)
-        resetText = Self.codexResetText(resetsAt: resetsAt, relativeTo: now)
-        displayModes = Self.codexDisplayModes(minutes: codexWindow.windowMinutes)
+        self.init(name: Self.codexWindowName(minutes: codexWindow.windowMinutes),
+                  percent: hasReset ? nil : codexWindow.usedPercent / 100,
+                  resetText: Self.codexResetText(resetsAt: resetsAt, relativeTo: now),
+                  displayModes: Self.codexDisplayModes(minutes: codexWindow.windowMinutes))
     }
 
     func matches(displayMode: DisplayMode) -> Bool {
         displayModes.contains(displayMode)
-    }
-
-    static func manualSetupRequired(for displayMode: DisplayMode) -> WindowPreview {
-        WindowPreview(
-            name: displayMode.windowTitle,
-            percent: 0,
-            resetText: "Manual setup required for this period",
-            displayModes: [displayMode]
-        )
     }
 
     private static func codexWindowName(minutes: Int) -> String {
@@ -1537,7 +1605,7 @@ struct WindowPreview: Identifiable {
     }
 }
 
-private func recentJSONFiles(in root: URL) throws -> [URL] {
+private func recentJSONFiles(in root: URL, descendInto: ((URL) -> Bool)? = nil, matching: (URL) -> Bool) throws -> [URL] {
     guard let enumerator = FileManager.default.enumerator(
         at: root,
         includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
@@ -1548,12 +1616,16 @@ private func recentJSONFiles(in root: URL) throws -> [URL] {
 
     var files: [(url: URL, modifiedAt: Date)] = []
     for case let file as URL in enumerator {
-        guard ["json", "jsonl"].contains(file.pathExtension.lowercased()) else {
+        if file.hasDirectoryPath, let descendInto, !descendInto(file) {
+            enumerator.skipDescendants()
+            continue
+        }
+        guard ["json", "jsonl"].contains(file.pathExtension.lowercased()), matching(file) else {
             continue
         }
 
-        let values = try file.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
-        guard values.isRegularFile == true else {
+        guard let values = try? file.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+              values.isRegularFile == true else {
             continue
         }
         files.append((file, values.contentModificationDate ?? .distantPast))
@@ -1564,31 +1636,28 @@ private func recentJSONFiles(in root: URL) throws -> [URL] {
         .map(\.url)
 }
 
-private func jsonObjects(in file: URL) throws -> [Any] {
-    let content = try String(contentsOf: file, encoding: .utf8)
-    let lineObjects = content.split(separator: "\n").compactMap { line -> Any? in
-        guard let data = line.data(using: .utf8) else {
-            return nil
-        }
-        return try? JSONSerialization.jsonObject(with: data)
+private func jsonObjects(in file: URL) throws -> [[String: Any]] {
+    let data = try Data(contentsOf: file, options: .mappedIfSafe)
+    if file.pathExtension.lowercased() == "json" {
+        let object = try JSONSerialization.jsonObject(with: data)
+        if let row = object as? [String: Any] { return [row] }
+        return object as? [[String: Any]] ?? []
     }
+    return data.split(separator: 10).compactMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+}
 
-    if !lineObjects.isEmpty {
-        return lineObjects
-    }
-
-    guard let data = content.data(using: .utf8) else {
-        return []
-    }
-    return [(try JSONSerialization.jsonObject(with: data))]
+private func tokenCount(_ value: Any?) -> Int? {
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+          let count = Int(number.stringValue), count >= 0 else { return nil }
+    return count
 }
 
 private func numberValue(for keys: [String], in dictionary: [String: Any]) -> Double? {
     for key in keys {
-        if let number = dictionary[key] as? NSNumber {
+        if let number = dictionary[key] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue.isFinite {
             return number.doubleValue
         }
-        if let string = dictionary[key] as? String, let value = Double(string) {
+        if let string = dictionary[key] as? String, let value = Double(string), value.isFinite {
             return value
         }
     }
@@ -1645,6 +1714,8 @@ private func planNameValue(in dictionary: [String: Any]) -> String? {
                 "subscription",
                 "subscription_tier",
                 "subscriptionTier",
+                "subscriptionType",
+                "subscription_type",
                 "tier"
             ],
             in: dictionary
@@ -1652,40 +1723,9 @@ private func planNameValue(in dictionary: [String: Any]) -> String? {
     )
 }
 
-private func findPlanName(in value: Any) -> String? {
-    if let dictionary = value as? [String: Any] {
-        if let planName = planNameValue(in: dictionary) {
-            return planName
-        }
-
-        for nestedValue in dictionary.values {
-            if let planName = findPlanName(in: nestedValue) {
-                return planName
-            }
-        }
-    }
-
-    if let array = value as? [Any] {
-        for nestedValue in array {
-            if let planName = findPlanName(in: nestedValue) {
-                return planName
-            }
-        }
-    }
-
-    return nil
-}
-
 private func parseFlexibleDate(_ value: String) -> Date? {
-    let fractionalFormatter = ISO8601DateFormatter()
-    fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let date = fractionalFormatter.date(from: value) {
-        return date
-    }
-
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime]
-    return formatter.date(from: value)
+    (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(value))
+        ?? (try? Date.ISO8601FormatStyle().parse(value))
 }
 
 private func relativeTimestamp(_ date: Date) -> String {
@@ -1699,305 +1739,328 @@ struct ProviderLiveUsage {
     let statusColor: Color
     let planName: String?
     let windows: [WindowPreview]
+    let tokenHistory: [RecordedTokenUsage]
 
     init(
         status: String,
         statusColor: Color,
         planName: String? = nil,
-        windows: [WindowPreview]
+        windows: [WindowPreview],
+        tokenHistory: [RecordedTokenUsage] = []
     ) {
         self.status = status
         self.statusColor = statusColor
         self.planName = planName
         self.windows = windows
+        self.tokenHistory = tokenHistory
     }
 }
 
 struct ClaudeCodeUsageReader {
+    var root = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]
+        .map { URL(fileURLWithPath: $0, isDirectory: true) }
+        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
+    var fetchAuthPlan: () -> String? = Self.authStatusPlanName
+
     func readLatestUsage() throws -> ProviderLiveUsage? {
-        let claudeRoot = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude")
-
-        var discoveredPlanName: String?
-
-        if FileManager.default.fileExists(atPath: claudeRoot.path) {
-            for file in try recentJSONFiles(in: claudeRoot).prefix(120) {
-                for object in try jsonObjects(in: file).reversed() {
-                    discoveredPlanName = discoveredPlanName ?? Self.directPlanName(in: object)
-
-                    if let rateLimits = Self.findRateLimits(in: object) {
-                        discoveredPlanName = discoveredPlanName ?? planNameValue(in: rateLimits)
-                        guard let windows = Self.windows(from: rateLimits), !windows.isEmpty else {
-                            continue
-                        }
-                        let planName = planNameValue(in: rateLimits)
-                            ?? discoveredPlanName
-                            ?? Self.authStatusPlanName()
-                        return ProviderLiveUsage(
-                            status: "Local",
-                            statusColor: .green,
-                            planName: planName,
-                            windows: windows
-                        )
-                    }
+        let captured = root.appendingPathComponent("vibemeasure-weekly.json")
+        var snapshot = (try? Data(contentsOf: captured))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        if snapshot == nil {
+            // Existing user-saved statusline payloads. Never treat tool calls or chat content as account metadata.
+            let files = try recentJSONFiles(in: root, descendInto: { directory in
+                ["cache", "statusline", "status-line", "usage"].contains(directory.lastPathComponent.lowercased())
+            }) { url in
+                let name = url.lastPathComponent.lowercased()
+                return ["statusline", "status-line", "rate-limit", "rate_limit", "usage"].contains(where: name.contains)
+            }
+            for file in files where snapshot == nil {
+                snapshot = (try? jsonObjects(in: file))?.reversed().first { object in
+                    object["rate_limits"] is [String: Any] || object["rateLimits"] is [String: Any]
                 }
             }
         }
 
-        if let planName = discoveredPlanName ?? Self.authStatusPlanName() {
-            return ProviderLiveUsage(
-                status: "Local",
-                statusColor: .green,
-                planName: planName,
-                windows: [
-                    WindowPreview(
-                        name: "Usage unavailable",
-                        percent: 0,
-                        resetText: "No verified Claude Code rate-limit window found"
-                    )
-                ]
-            )
+        let limits = snapshot?["rate_limits"] as? [String: Any] ?? snapshot?["rateLimits"] as? [String: Any] ?? [:]
+        var windows = Self.weeklyWindows(from: limits)
+        if windows.isEmpty {
+            windows.append(WindowPreview(name: "7-Day", percent: nil,
+                resetText: "No current weekly quota reported by Claude Code", displayModes: [.oneWeek]))
         }
-
-        return nil
+        let history = try messageUsage()
+        if let usage = history.last {
+            windows.append(WindowPreview(name: "Latest message tokens", percent: nil,
+                resetText: "Last recorded \(relativeTimestamp(usage.timestamp))", valueText: "\(usage.total.formatted()) tokens"))
+        }
+        let plan = fetchAuthPlan() ?? planNameValue(in: limits) ?? snapshot.flatMap(planNameValue)
+        guard snapshot != nil || !history.isEmpty || plan != nil else { return nil }
+        return ProviderLiveUsage(status: "Local", statusColor: .green, planName: plan, windows: windows, tokenHistory: history.recordedHistory)
     }
 
-    private static func authStatusPlanName() -> String? {
-        let process = Process()
-        let standardOutput = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["claude", "auth", "status"]
-        process.standardOutput = standardOutput
-        process.standardError = Pipe()
+    private static let cache = SessionFileCache<[SessionTokenRecord]>()
 
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return nil
-        }
-
-        guard process.terminationStatus == 0 else {
-            return nil
-        }
-
-        let outputData = standardOutput.fileHandleForReading.readDataToEndOfFile()
-        guard let object = try? JSONSerialization.jsonObject(with: outputData) else {
-            return nil
-        }
-        return findPlanName(in: object)
-    }
-
-    private static func directPlanName(in value: Any) -> String? {
-        guard let dictionary = value as? [String: Any] else {
-            return nil
-        }
-        return planNameValue(in: dictionary)
-    }
-
-    private static func findRateLimits(in value: Any) -> [String: Any]? {
-        if let dictionary = value as? [String: Any] {
-            if let rateLimits = dictionary["rate_limits"] as? [String: Any] {
-                return rateLimits
-            }
-            if let rateLimits = dictionary["rateLimits"] as? [String: Any] {
-                return rateLimits
-            }
-
-            for nestedValue in dictionary.values {
-                if let found = findRateLimits(in: nestedValue) {
-                    return found
+    private func messageUsage() throws -> [SessionTokenRecord] {
+        let files = try recentJSONFiles(in: root.appendingPathComponent("projects")) { $0.pathExtension == "jsonl" }
+        var records: [SessionTokenRecord] = []
+        let usageKey = Data(#""usage""#.utf8)
+        for file in files {
+            let fileRecords = try? Self.cache.contents(of: file) { data in
+                var rows: [SessionTokenRecord] = []
+                let decoder = JSONDecoder()
+                forEachJSONLine(in: data, containing: usageKey) { line in
+                    guard let row = try? decoder.decode(ClaudeMessageEnvelope.self, from: line),
+                          let record = row.record else { return }
+                    rows.append(record)
                 }
+                return distinctTokenRecords(rows)
             }
+            records.append(contentsOf: fileRecords ?? [])
         }
-
-        if let array = value as? [Any] {
-            for nestedValue in array {
-                if let found = findRateLimits(in: nestedValue) {
-                    return found
-                }
-            }
-        }
-
-        return nil
+        return distinctTokenRecords(records)
     }
 
-    private static func windows(from rateLimits: [String: Any]) -> [WindowPreview]? {
-        let candidates: [(keys: [String], fallbackName: String, mode: DisplayMode)] = [
-            (["five_hour", "fiveHour", "5h", "five_hours"], "5-Hour", .fiveHours),
-            (["seven_day", "sevenDay", "7d", "weekly"], "7-Day", .oneWeek),
-            (["monthly", "month", "one_month"], "1 Month", .oneMonth)
-        ]
+    static func authStatusPlanName() -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let paths = ProcessInfo.processInfo.environment["PATH"]?.components(separatedBy: ":") ?? []
+        let candidates = (paths + [home.appendingPathComponent(".local/bin").path, "/opt/homebrew/bin", "/usr/local/bin"])
+            .map { URL(fileURLWithPath: $0).appendingPathComponent("claude") }
+        guard let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }),
+              let result = try? LocalAgentCommand.run(executable: executable, arguments: ["auth", "status"]),
+              result.status == 0,
+              let data = try? JSONSerialization.jsonObject(with: result.stdout) as? [String: Any],
+              data["loggedIn"] as? Bool != false else { return nil }
+        return planNameValue(in: data)
+    }
 
-        return candidates.compactMap { candidate in
-            guard let window = candidate.keys.compactMap({ rateLimits[$0] as? [String: Any] }).first else {
-                return nil
+    static func weeklyWindows(from limits: [String: Any], now: Date = Date()) -> [WindowPreview] {
+        var windows: [WindowPreview] = []
+        var seen: Set<String> = []
+        for key in limits.keys.sorted() {
+            // Accept model-specific weekly buckets only when the provider actually supplies them.
+            let name: String
+            switch key {
+            case "seven_day", "sevenDay", "7d", "weekly": name = "7-Day"
+            case let key where key.hasPrefix("seven_day_"):
+                guard let category = displayPlanName(from: String(key.dropFirst("seven_day_".count))) else { continue }
+                name = "7-Day · \(category)"
+            default: continue
             }
-
-            let usedPercent = numberValue(for: ["used_percentage", "usedPercent", "usage_percent", "usagePercent"], in: window)
-                ?? numberValue(for: ["used_percent", "usedPercent"], in: window)
-                ?? 0
-            let resetsAt = numberValue(for: ["resets_at", "resetsAt", "reset_at", "resetAt"], in: window)
-            let resetText = resetsAt.map { WindowPreview.resetText(resetsAt: Date(timeIntervalSince1970: $0)) }
-                ?? "Claude Code statusline window"
-
-            return WindowPreview(
-                name: stringValue(for: ["name", "label"], in: window) ?? candidate.fallbackName,
-                percent: min(max(usedPercent / 100, 0), 1),
-                resetText: resetText,
-                displayModes: [candidate.mode]
-            )
+            guard let window = limits[key] as? [String: Any],
+                  let percent = numberValue(for: ["used_percentage", "used_percent", "usedPercent", "usage_percent", "usagePercent", "utilization"], in: window),
+                  (0...100).contains(percent), !seen.contains(name) else { continue }
+            let reset = numberValue(for: ["resets_at", "resetsAt", "reset_at", "resetAt"], in: window)
+                .map(Date.init(timeIntervalSince1970:))
+                ?? stringValue(for: ["resets_at", "resetsAt"], in: window).flatMap(parseFlexibleDate)
+            seen.insert(name)
+            windows.append(WindowPreview(name: name, percent: reset.map { $0 <= now } == true ? nil : percent / 100,
+                resetText: reset.map { WindowPreview.resetText(resetsAt: $0, relativeTo: now) } ?? "Claude Code weekly usage",
+                displayModes: [.oneWeek]))
         }
+        return windows
+    }
+}
+
+private struct ClaudeMessageEnvelope: Decodable {
+    let type: String
+    let timestamp: String
+    let requestId: String?
+    let isApiErrorMessage: Bool?
+    let message: Message
+
+    struct Message: Decodable {
+        let id: String?
+        let model: String?
+        let usage: Counts
+    }
+
+    struct Counts: Decodable {
+        let input_tokens: Int
+        let output_tokens: Int
+        let cache_creation_input_tokens: Int?
+        let cache_read_input_tokens: Int?
+    }
+
+    var record: SessionTokenRecord? {
+        guard type == "assistant", isApiErrorMessage != true, message.model != "<synthetic>",
+              let id = message.id ?? requestId, !id.isEmpty,
+              let date = parseFlexibleDate(timestamp) else { return nil }
+        let counts = message.usage
+        var total = 0
+        for count in [counts.input_tokens, counts.output_tokens, counts.cache_creation_input_tokens ?? 0, counts.cache_read_input_tokens ?? 0] {
+            let sum = total.addingReportingOverflow(count)
+            guard count >= 0, !sum.overflow else { return nil }
+            total = sum.partialValue
+        }
+        guard total > 0 else { return nil }
+        return SessionTokenRecord(id: id, timestamp: date, total: total, model: message.model)
     }
 }
 
 struct CodexCliUsageReader {
+    var root = (ProcessInfo.processInfo.environment["CODEX_HOME"].map { URL(fileURLWithPath: $0) }
+        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")).appendingPathComponent("sessions")
+    private static let cache = SessionFileCache<CodexSessionScan>()
+
     func readLatestUsage() throws -> ProviderLiveUsage? {
-        let sessionRoot = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex")
-            .appendingPathComponent("sessions")
-
-        guard FileManager.default.fileExists(atPath: sessionRoot.path) else {
-            return nil
+        var directories = [root]
+        if root.lastPathComponent == "sessions" {
+            directories.append(root.deletingLastPathComponent().appendingPathComponent("archived_sessions"))
         }
-
-        let files = try codexSessionFiles(in: sessionRoot)
-        var latestEvent: CodexTokenCountEvent?
-
-        for file in files.prefix(80) {
-            for event in try tokenCountEvents(in: file) {
-                if latestEvent == nil || event.timestamp > latestEvent!.timestamp {
-                    latestEvent = event
+        let files = try directories.flatMap { directory in
+            try recentJSONFiles(in: directory) { $0.pathExtension == "jsonl" && $0.lastPathComponent.hasPrefix("rollout-") }
+        }
+        var quotas: [String: CodexQuotaSample] = [:]
+        var plan: (date: Date, name: String)?
+        var records: [SessionTokenRecord] = []
+        for file in files {
+            guard let scan = try? Self.cache.contents(of: file, parse: { Self.scan($0, file: file) }) else { continue }
+            records.append(contentsOf: scan.records)
+            for (bucket, sample) in scan.quotas where sample.date >= (quotas[bucket]?.date ?? .distantPast) {
+                quotas[bucket] = sample
+            }
+            if let candidate = scan.plan, candidate.date > (plan?.date ?? .distantPast) { plan = candidate }
+        }
+        var windows: [WindowPreview] = []
+        for key in quotas.keys.sorted() {
+            guard let sample = quotas[key] else { continue }
+            for window in sample.limits.windows {
+                if key == "codex" {
+                    windows.append(window)
+                } else {
+                    windows.append(WindowPreview(name: "\(sample.limits.limitName ?? key) · \(window.name)",
+                        percent: window.hasKnownPercent ? window.percent : nil, resetText: window.resetText, displayModes: window.displayModes))
                 }
             }
         }
-
-        guard let latestEvent else {
-            return nil
+        let history = distinctTokenRecords(records)
+        if let latest = history.last {
+            windows.append(WindowPreview(name: "Latest recorded tokens", percent: nil,
+                resetText: "Last recorded \(relativeTimestamp(latest.timestamp))", valueText: "\(latest.total.formatted()) tokens"))
         }
-
-        let windows = latestEvent.rateLimits.windows
-        if windows.isEmpty {
-            return ProviderLiveUsage(
-                status: "Local",
-                statusColor: .green,
-                planName: latestEvent.rateLimits.planName,
-                windows: [
-                    WindowPreview(
-                        name: "Token usage",
-                        percent: 0,
-                        resetText: "Latest Codex CLI event: \(Self.relativeTimestamp(latestEvent.timestamp))"
-                    )
-                ]
-            )
-        }
-
-        return ProviderLiveUsage(
-            status: "Local",
-            statusColor: .green,
-            planName: latestEvent.rateLimits.planName,
-            windows: windows
-        )
+        guard !windows.isEmpty || plan != nil else { return nil }
+        return ProviderLiveUsage(status: "Local", statusColor: .green, planName: plan?.name,
+            windows: windows, tokenHistory: history.recordedHistory)
     }
 
-    private func codexSessionFiles(in root: URL) throws -> [URL] {
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-            options: [.skipsPackageDescendants]
-        ) else {
-            return []
-        }
-
-        var files: [(url: URL, modifiedAt: Date)] = []
-        for case let file as URL in enumerator {
-            guard file.pathExtension == "jsonl",
-                  file.lastPathComponent.hasPrefix("rollout-") else {
-                continue
-            }
-
-            let values = try file.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
-            guard values.isRegularFile == true else {
-                continue
-            }
-
-            files.append((file, values.contentModificationDate ?? .distantPast))
-        }
-
-        return files
-            .sorted { $0.modifiedAt > $1.modifiedAt }
-            .map(\.url)
-    }
-
-    private func tokenCountEvents(in file: URL) throws -> [CodexTokenCountEvent] {
-        let rawContent = try String(contentsOf: file, encoding: .utf8)
+    private static func scan(_ data: Data, file: URL) -> CodexSessionScan {
+        var scan = CodexSessionScan()
+        var sessionID: String?
+        var accounted = 0
+        var sawCumulative = false
         let decoder = JSONDecoder()
-        var events: [CodexTokenCountEvent] = []
-
-        for line in rawContent.split(separator: "\n") {
-            guard let data = line.data(using: .utf8),
-                  let envelope = try? decoder.decode(CodexEventEnvelope.self, from: data),
-                  envelope.payload.type == "token_count",
-                  let timestamp = Self.parseTimestamp(envelope.timestamp) else {
-                continue
+        let eventKey = Data(#""token_count""#.utf8)
+        let metaKey = Data(#""session_meta""#.utf8)
+        // Distinguish multiple calls within one clock tick, including legacy last-only records.
+        var occurrences: [String: Int] = [:]
+        forEachJSONLine(in: data) { line in
+            if sessionID == nil, line.range(of: metaKey) != nil,
+               let meta = try? JSONSerialization.jsonObject(with: line) as? [String: Any], meta["type"] as? String == "session_meta",
+               let payload = meta["payload"] as? [String: Any], let id = payload["id"] as? String { sessionID = id }
+            guard line.range(of: eventKey) != nil,
+                  let event = try? decoder.decode(CodexEventEnvelope.self, from: line), event.payload.type == "token_count",
+                  let date = parseFlexibleDate(event.timestamp) else { return }
+            if let limits = event.payload.rateLimits {
+                let key = limits.limitID ?? "codex"
+                if (limits.primary != nil || limits.secondary != nil), date >= (scan.quotas[key]?.date ?? .distantPast) {
+                    scan.quotas[key] = CodexQuotaSample(date: date, limits: limits)
+                }
+                if let name = limits.planName, date >= (scan.plan?.date ?? .distantPast) { scan.plan = (date, name) }
             }
-
-            events.append(
-                CodexTokenCountEvent(
-                    timestamp: timestamp,
-                    rateLimits: envelope.payload.rateLimits
-                )
-            )
+            let last = event.payload.info?.last_token_usage?.total
+            let current = event.payload.info?.total_token_usage?.total
+            let increment: Int?
+            if let current {
+                let delta = current - accounted
+                if delta == 0 {
+                    increment = nil
+                } else if let last, !sawCumulative || last == delta || delta < 0 {
+                    increment = last
+                } else {
+                    increment = delta > 0 ? delta : nil
+                }
+                sawCumulative = true
+                accounted = current
+            } else {
+                increment = last
+                if let last {
+                    let sum = accounted.addingReportingOverflow(last)
+                    guard !sum.overflow else { return }
+                    accounted = sum.partialValue
+                }
+            }
+            guard let increment, increment > 0 else { return }
+            let base = "\(sessionID ?? file.lastPathComponent)/\(event.timestamp)/\(current ?? increment)"
+            let index = occurrences[base, default: 0]
+            occurrences[base] = index + 1
+            scan.records.append(SessionTokenRecord(id: "\(base)/\(index)", timestamp: date, total: increment))
         }
-
-        return events
-    }
-
-    private static func parseTimestamp(_ rawValue: String) -> Date? {
-        let fractionalFormatter = ISO8601DateFormatter()
-        fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractionalFormatter.date(from: rawValue) {
-            return date
-        }
-
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: rawValue)
-    }
-
-    private static func relativeTimestamp(_ date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: Date())
+        return scan
     }
 }
 
-struct CodexTokenCountEvent {
-    let timestamp: Date
-    let rateLimits: CodexRateLimits
+private struct CodexQuotaSample: Sendable {
+    let date: Date
+    let limits: CodexRateLimits
 }
 
-struct CodexEventEnvelope: Decodable {
+private struct CodexSessionScan: Sendable {
+    var quotas: [String: CodexQuotaSample] = [:]
+    var plan: (date: Date, name: String)?
+    var records: [SessionTokenRecord] = []
+}
+
+private struct CodexEventEnvelope: Decodable {
     let timestamp: String
     let payload: Payload
 
+    struct Counts: Decodable {
+        let total_tokens: Int?
+        let input_tokens: Int?
+        let output_tokens: Int?
+
+        var total: Int? {
+            if let total_tokens { return total_tokens >= 0 ? total_tokens : nil }
+            guard input_tokens != nil || output_tokens != nil else { return nil }
+            let input = input_tokens ?? 0, output = output_tokens ?? 0
+            let sum = input.addingReportingOverflow(output)
+            return (input >= 0 && output >= 0 && !sum.overflow) ? sum.partialValue : nil
+        }
+    }
+
+    struct Info: Decodable {
+        let total_token_usage: Counts?
+        let last_token_usage: Counts?
+    }
+
     struct Payload: Decodable {
         let type: String
-        let rateLimits: CodexRateLimits
+        let info: Info?
+        let rateLimits: CodexRateLimits?
 
         enum CodingKeys: String, CodingKey {
-            case type
+            case type, info
             case rateLimits = "rate_limits"
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            type = try container.decode(String.self, forKey: .type)
+            info = try? container.decode(Info.self, forKey: .info)
+            rateLimits = try? container.decode(CodexRateLimits.self, forKey: .rateLimits)
         }
     }
 }
 
-struct CodexRateLimits: Decodable {
+struct CodexRateLimits: Decodable, Sendable {
+    let limitID: String?
+    let limitName: String?
     let primary: CodexRateLimitWindow?
     let secondary: CodexRateLimitWindow?
     let planType: String?
 
     enum CodingKeys: String, CodingKey {
+        case limitID = "limit_id"
+        case limitName = "limit_name"
         case primary
         case secondary
         case planType = "plan_type"
@@ -2018,7 +2081,7 @@ struct CodexRateLimits: Decodable {
     }
 }
 
-struct CodexRateLimitWindow: Decodable {
+struct CodexRateLimitWindow: Decodable, Sendable {
     let resetsAt: TimeInterval
     let usedPercent: Double
     let windowMinutes: Int
@@ -2031,98 +2094,39 @@ struct CodexRateLimitWindow: Decodable {
 }
 
 struct GeminiCliUsageReader {
+    var root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".gemini/tmp")
+    private static let cache = SessionFileCache<[SessionTokenRecord]>()
+
     func readLatestUsage() throws -> ProviderLiveUsage? {
-        let geminiRoot = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".gemini")
-            .appendingPathComponent("tmp")
-
-        guard FileManager.default.fileExists(atPath: geminiRoot.path) else {
-            return nil
-        }
-
-        var latestEvent: GeminiTokenEvent?
-        for file in try Self.chatSessionFiles(in: geminiRoot).prefix(120) {
-            for object in try jsonObjects(in: file) {
-                guard let event = GeminiTokenEvent(object: object) else {
-                    continue
+        let files = try recentJSONFiles(in: root) { $0.deletingLastPathComponent().lastPathComponent == "chats" }
+        var records: [SessionTokenRecord] = []
+        for file in files {
+            let jsonLines = file.pathExtension.lowercased() == "jsonl"
+            guard let fileRecords = try? Self.cache.contents(of: file, parse: { data in
+                var rows: [SessionTokenRecord] = []
+                func add(_ item: [String: Any]) {
+                    guard let usage = item["tokens"] as? [String: Any], let total = tokenCount(usage["total"]), total > 0,
+                          let timestamp = stringValue(for: ["timestamp", "createdAt", "updatedAt"], in: item),
+                          let date = parseFlexibleDate(timestamp) else { return }
+                    let id = stringValue(for: ["id", "messageId"], in: item) ?? "\(file.deletingPathExtension().lastPathComponent)/\(timestamp)"
+                    rows.append(SessionTokenRecord(id: id, timestamp: date, total: total, model: item["model"] as? String))
                 }
-                if latestEvent == nil || event.timestamp > latestEvent!.timestamp {
-                    latestEvent = event
+                if jsonLines {
+                    forEachJSONLine(in: data, containing: Data(#""tokens""#.utf8)) { line in
+                        if let row = try? JSONSerialization.jsonObject(with: line) as? [String: Any] { add(row) }
+                    }
+                } else if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    (object["messages"] as? [[String: Any]] ?? [object]).forEach(add)
                 }
-            }
+                return distinctTokenRecords(rows)
+            }) else { continue }
+            records.append(contentsOf: fileRecords)
         }
-
-        guard let latestEvent else {
-            return nil
-        }
-
-        return ProviderLiveUsage(
-            status: "Local",
-            statusColor: .green,
-            windows: [
-                WindowPreview(
-                    name: latestEvent.model.isEmpty ? "Token usage" : latestEvent.model,
-                    percent: 0,
-                    resetText: "Latest Gemini CLI event: \(relativeTimestamp(latestEvent.timestamp)); total tokens \(latestEvent.totalTokens)"
-                )
-            ]
-        )
-    }
-
-    private static func chatSessionFiles(in root: URL) throws -> [URL] {
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) else {
-            return []
-        }
-
-        var files: [(url: URL, modifiedAt: Date)] = []
-        for case let file as URL in enumerator {
-            guard ["json", "jsonl"].contains(file.pathExtension.lowercased()),
-                  file.deletingLastPathComponent().lastPathComponent == "chats" else {
-                continue
-            }
-
-            let values = try file.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
-            guard values.isRegularFile == true else {
-                continue
-            }
-
-            files.append((file, values.contentModificationDate ?? .distantPast))
-        }
-
-        return files
-            .sorted { $0.modifiedAt > $1.modifiedAt }
-            .map(\.url)
-    }
-}
-
-struct GeminiTokenEvent {
-    let timestamp: Date
-    let model: String
-    let totalTokens: Int
-
-    init?(object: Any) {
-        guard let dictionary = object as? [String: Any],
-              let tokenDictionary = dictionary["tokens"] as? [String: Any] else {
-            return nil
-        }
-
-        let timestamp = stringValue(for: ["timestamp", "createdAt", "updatedAt"], in: dictionary)
-            .flatMap(parseFlexibleDate)
-            ?? Date.distantPast
-        let model = stringValue(for: ["model"], in: dictionary) ?? ""
-        let totalTokens = Int(numberValue(for: ["total"], in: tokenDictionary) ?? 0)
-
-        guard totalTokens > 0 else {
-            return nil
-        }
-
-        self.timestamp = timestamp
-        self.model = model
-        self.totalTokens = totalTokens
+        let history = distinctTokenRecords(records)
+        guard let latest = history.last else { return nil }
+        let window = WindowPreview(name: latest.model ?? "Latest message tokens", percent: nil,
+            resetText: "Last recorded \(relativeTimestamp(latest.timestamp))", valueText: "\(latest.total.formatted()) tokens")
+        return ProviderLiveUsage(status: "Local", statusColor: .green, windows: [window], tokenHistory: history.recordedHistory)
     }
 }
 
@@ -2153,39 +2157,20 @@ struct MiniMaxCliUsageReader {
 
     private func runQuotaCommand() throws -> Data {
         let command = commandHint.trimmingCharacters(in: .whitespacesAndNewlines)
-        let process = Process()
-        let standardOutput = Pipe()
-        let standardError = Pipe()
         let quotaArguments = ["quota", "show", "--output", "json", "--quiet", "--non-interactive"]
-
-        if let executableURL = executableURL(for: command) {
-            process.executableURL = executableURL
-            process.arguments = quotaArguments
-        } else {
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = [(command.isEmpty ? "mmx" : command)] + quotaArguments
-        }
-
-        process.standardOutput = standardOutput
-        process.standardError = standardError
-
-        try process.run()
-        process.waitUntilExit()
-
-        let outputData = standardOutput.fileHandleForReading.readDataToEndOfFile()
-        if process.terminationStatus == 0 {
-            return outputData
-        }
-
-        let errorData = standardError.fileHandleForReading.readDataToEndOfFile()
-        let errorText = Self.redactedSecretText(
-            String(data: errorData, encoding: .utf8) ?? "No stderr output"
+        let executable = executableURL(for: command)
+        let result = try LocalAgentCommand.run(
+            executable: executable ?? URL(fileURLWithPath: "/usr/bin/env"),
+            arguments: executable == nil ? [command.isEmpty ? "mmx" : command] + quotaArguments : quotaArguments
         )
-        throw LocalUsageReaderError.commandFailed(
-            command: "mmx quota show",
-            status: Int(process.terminationStatus),
-            stderr: errorText
-        )
+        guard result.status == 0 else {
+            throw LocalUsageReaderError.commandFailed(
+                command: "mmx quota show",
+                status: Int(result.status),
+                stderr: Self.redactedSecretText(String(decoding: result.stderr.prefix(2_048), as: UTF8.self))
+            )
+        }
+        return result.stdout
     }
 
     private func executableURL(for command: String) -> URL? {
@@ -2194,6 +2179,7 @@ struct MiniMaxCliUsageReader {
             return URL(fileURLWithPath: command)
         }
 
+        guard command.isEmpty || command == "mmx" else { return nil }
         for path in ["/opt/homebrew/bin/mmx", "/usr/local/bin/mmx"] where fileManager.isExecutableFile(atPath: path) {
             return URL(fileURLWithPath: path)
         }
@@ -2246,19 +2232,19 @@ struct MiniMaxBaseResponse: Decodable {
 }
 
 struct MiniMaxModelRemain: Decodable {
-    let startTime: Int64
-    let endTime: Int64
-    let remainsTime: Int64
-    let currentIntervalTotalCount: Int
-    let currentIntervalUsageCount: Int
     let modelName: String
-    let currentWeeklyTotalCount: Int
-    let currentWeeklyUsageCount: Int
-    let weeklyStartTime: Int64
-    let weeklyEndTime: Int64
-    let weeklyRemainsTime: Int64
-    let currentIntervalRemainingPercent: Double
-    let currentWeeklyRemainingPercent: Double
+    let endTime: Int64?
+    let remainsTime: Int64?
+    let currentIntervalTotalCount: Int?
+    let currentIntervalUsageCount: Int?
+    let currentIntervalRemainingPercent: Double?
+    let currentIntervalStatus: Int?
+    let currentWeeklyTotalCount: Int?
+    let currentWeeklyUsageCount: Int?
+    let weeklyEndTime: Int64?
+    let weeklyRemainsTime: Int64?
+    let currentWeeklyRemainingPercent: Double?
+    let currentWeeklyStatus: Int?
 
     var quotaCategory: MiniMaxQuotaCategory {
         MiniMaxQuotaCategory(modelName: modelName)
@@ -2266,80 +2252,62 @@ struct MiniMaxModelRemain: Decodable {
 
     var windows: [WindowPreview] {
         [
-            WindowPreview(
-                name: "\(quotaCategory.displayName) 5-Hour",
-                percent: Self.usedPercent(
-                    usageCount: currentIntervalUsageCount,
-                    totalCount: currentIntervalTotalCount,
-                    remainingPercent: currentIntervalRemainingPercent
-                ),
-                resetText: Self.resetText(
-                    remainingMilliseconds: remainsTime,
-                    endMilliseconds: endTime,
-                    usageCount: currentIntervalUsageCount,
-                    totalCount: currentIntervalTotalCount,
-                    remainingPercent: currentIntervalRemainingPercent
-                ),
-                displayModes: [.fiveHours]
-            ),
-            WindowPreview(
-                name: "\(quotaCategory.displayName) 1 Week",
-                percent: Self.usedPercent(
-                    usageCount: currentWeeklyUsageCount,
-                    totalCount: currentWeeklyTotalCount,
-                    remainingPercent: currentWeeklyRemainingPercent
-                ),
-                resetText: Self.resetText(
-                    remainingMilliseconds: weeklyRemainsTime,
-                    endMilliseconds: weeklyEndTime,
-                    usageCount: currentWeeklyUsageCount,
-                    totalCount: currentWeeklyTotalCount,
-                    remainingPercent: currentWeeklyRemainingPercent
-                ),
-                displayModes: [.oneWeek]
-            )
+            window(label: "5-Hour", mode: .fiveHours, count: currentIntervalUsageCount,
+                   total: currentIntervalTotalCount, remainingPercent: currentIntervalRemainingPercent,
+                   status: currentIntervalStatus, duration: remainsTime, end: endTime),
+            window(label: "1 Week", mode: .oneWeek, count: currentWeeklyUsageCount,
+                   total: currentWeeklyTotalCount, remainingPercent: currentWeeklyRemainingPercent,
+                   status: currentWeeklyStatus, duration: weeklyRemainsTime, end: weeklyEndTime)
         ]
     }
 
-    private static func usedPercent(usageCount: Int, totalCount: Int, remainingPercent: Double) -> Double {
-        if totalCount > 0 {
-            return min(max(Double(usageCount) / Double(totalCount), 0), 1)
+    private func window(label: String, mode: DisplayMode, count: Int?, total: Int?,
+                        remainingPercent: Double?, status: Int?, duration: Int64?, end: Int64?) -> WindowPreview {
+        var percent: Double?
+        let detail: String
+        let reportedPercent = remainingPercent.flatMap { (0...100).contains($0) ? $0 : nil }
+        if status == 3 && total == 0 {
+            detail = "Not included in this plan"
+        } else if let total, let remaining = Self.remainingCount(count: count, total: total, percent: reportedPercent) {
+            let used = total - remaining
+            percent = Double(used) / Double(total)
+            detail = "\(used)/\(total) used; \(remaining) available"
+        } else if let reportedPercent {
+            percent = 1 - reportedPercent / 100
+            detail = "remaining \(reportedPercent.formatted())%"
+        } else {
+            detail = "Usage not reported"
         }
 
-        return min(max(1 - remainingPercent / 100, 0), 1)
-    }
-
-    private static func resetText(
-        remainingMilliseconds: Int64,
-        endMilliseconds: Int64,
-        usageCount: Int,
-        totalCount: Int,
-        remainingPercent: Double
-    ) -> String {
-        let resetPrefix = resetPrefix(
-            remainingMilliseconds: remainingMilliseconds,
-            endMilliseconds: endMilliseconds
+        let reset = Self.resetPrefix(remainingMilliseconds: duration, endMilliseconds: end)
+        return WindowPreview(
+            name: "\(quotaCategory.displayName) \(label)",
+            percent: percent,
+            resetText: [reset, detail].compactMap { $0 }.joined(separator: "; "),
+            displayModes: [mode]
         )
-
-        if totalCount > 0 {
-            let availableCount = max(totalCount - usageCount, 0)
-            return "\(resetPrefix); \(usageCount)/\(totalCount) used; \(availableCount) available"
-        }
-
-        return "\(resetPrefix); remaining \(Int(remainingPercent))%"
     }
 
-    private static func resetPrefix(remainingMilliseconds: Int64, endMilliseconds: Int64) -> String {
-        if remainingMilliseconds > 0 {
+    // mmx treats usage_count as remaining by default. Some responses instead contain
+    // the used count; the independently reported remaining percentage disambiguates.
+    private static func remainingCount(count: Int?, total: Int, percent: Double?) -> Int? {
+        guard let count, total > 0, (0...total).contains(count) else { return nil }
+        guard let percent else { return count }
+        let directError = abs(100 * Double(count) / Double(total) - percent)
+        let inverseError = abs(100 * Double(total - count) / Double(total) - percent)
+        guard min(directError, inverseError) <= 1 else { return nil }
+        return inverseError < directError ? total - count : count
+    }
+
+    private static func resetPrefix(remainingMilliseconds: Int64?, endMilliseconds: Int64?) -> String? {
+        if let remainingMilliseconds, remainingMilliseconds > 0 {
             return "Resets in \(durationText(seconds: remainingMilliseconds / 1_000))"
         }
-
+        guard let endMilliseconds, endMilliseconds > 0 else { return nil }
         let endDate = Date(timeIntervalSince1970: TimeInterval(endMilliseconds) / 1_000)
-        let remainingSeconds = Int(endDate.timeIntervalSince(Date()))
-        guard remainingSeconds > 0 else {
-            return "Reset time passed; refresh MiniMAX"
-        }
-        return "Resets in \(durationText(seconds: Int64(remainingSeconds)))"
+        let remainingSeconds = Int64(endDate.timeIntervalSinceNow)
+        guard remainingSeconds > 0 else { return "Reset time passed; refresh MiniMAX" }
+        return "Resets in \(durationText(seconds: remainingSeconds))"
     }
 
     private static func durationText(seconds: Int64) -> String {
@@ -2401,13 +2369,13 @@ enum MiniMaxQuotaCategory: Hashable {
         [
             WindowPreview(
                 name: "\(displayName) 5-Hour",
-                percent: 0,
+                percent: nil,
                 resetText: "Not reported by mmx quota show; no verified usage or available quota",
                 displayModes: [.fiveHours]
             ),
             WindowPreview(
                 name: "\(displayName) 1 Week",
-                percent: 0,
+                percent: nil,
                 resetText: "Not reported by mmx quota show; no verified usage or available quota",
                 displayModes: [.oneWeek]
             )
@@ -2454,7 +2422,7 @@ struct ProviderEditor: View {
                 TextField("Command hint", text: $provider.commandHint)
                 TextField("SF Symbol", text: $provider.symbolName)
                 Picker("Data source", selection: $provider.dataSource) {
-                    ForEach(ProviderDataSource.allCases) { source in
+                    ForEach(provider.availableDataSources) { source in
                         Text(source.rawValue).tag(source)
                     }
                 }
@@ -2476,19 +2444,22 @@ struct ProviderEditor: View {
             }
 
             Section("Manual windows") {
-                if provider.manualWindows.isEmpty {
+                if provider.visibleManualWindows.isEmpty {
                     Text("No manual windows configured.")
                         .foregroundStyle(.secondary)
                 }
 
                 ForEach($provider.manualWindows) { $window in
-                    ManualWindowEditor(window: $window) {
-                        provider.manualWindows.removeAll { $0.id == window.id }
+                    if provider.allowedWindowKinds.contains(window.kind) {
+                        ManualWindowEditor(window: $window, kinds: provider.allowedWindowKinds) {
+                            provider.manualWindows.removeAll { $0.id == window.id }
+                        }
                     }
                 }
 
                 Button {
-                    provider.manualWindows.append(ManualUsageWindow())
+                    let kind = provider.allowedWindowKinds[0]
+                    provider.manualWindows.append(ManualUsageWindow(kind: kind, label: kind.rawValue))
                 } label: {
                     Label("Add Window", systemImage: "plus")
                 }
@@ -2501,13 +2472,14 @@ struct ProviderEditor: View {
 
 struct ManualWindowEditor: View {
     @Binding var window: ManualUsageWindow
+    let kinds: [UsageWindowKind]
     let delete: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Picker("Kind", selection: $window.kind) {
-                    ForEach(UsageWindowKind.allCases) { kind in
+                    ForEach(kinds) { kind in
                         Text(kind.rawValue).tag(kind)
                     }
                 }
@@ -2765,6 +2737,9 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
         isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
         pollIntervalMinutes = try container.decodeIfPresent(Int.self, forKey: .pollIntervalMinutes) ?? 5
         manualWindows = try container.decode([ManualUsageWindow].self, forKey: .manualWindows)
+        if !availableDataSources.contains(dataSource) {
+            dataSource = visibleManualWindows.isEmpty ? .unknown : .manual
+        }
     }
 
     static func builtIn(
@@ -2801,6 +2776,18 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
             pollIntervalMinutes: 5,
             manualWindows: []
         )
+    }
+
+    var availableDataSources: [ProviderDataSource] {
+        hasVerifiedLocalAdapter ? [.localAdapter, .manual, .unknown] : [.manual, .unknown]
+    }
+
+    var allowedWindowKinds: [UsageWindowKind] {
+        id == "claude" ? [.oneWeek] : UsageWindowKind.allCases
+    }
+
+    var visibleManualWindows: [ManualUsageWindow] {
+        manualWindows.filter { allowedWindowKinds.contains($0.kind) }
     }
 
     var hasVerifiedLocalAdapter: Bool {

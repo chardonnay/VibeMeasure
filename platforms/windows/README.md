@@ -1,18 +1,15 @@
-# Windows Native Shell
+# Windows usage monitor
 
-This folder contains the first WinUI 3 / Windows App SDK implementation slice.
+The WinUI 3 desktop app shows imported token totals and active quota windows from a VibeMeasure database. Selecting a display mode, clicking Refresh, or leaving the app open for a minute requests a new snapshot. The app looks for `vibemeasure-cli.exe` beside the executable or on PATH.
 
-- `VibeMeasure.Windows` is a native Windows desktop shell.
-- Tray integration, notifications, autostart, and Windows Widgets provider packaging are planned platform work items after the core snapshot contract is stable.
-- The UI text explicitly marks unknown/manual data; no quotas or prices are hardcoded.
-
-Validation on Windows:
+The default database is `%LOCALAPPDATA%\VibeMeasure\vibemeasure.sqlite`. Set `VIBEMEASURE_DB` before launching the app to select an existing database. To try a local Codex session from the repository root in PowerShell:
 
 ```powershell
-cd platforms/windows/VibeMeasure.Windows
-dotnet restore
-dotnet build
-dotnet run
+cargo install --path apps/vibemeasure-cli --locked
+$db = Join-Path $env:LOCALAPPDATA "VibeMeasure\vibemeasure.sqlite"
+New-Item -ItemType Directory -Force (Split-Path $db) | Out-Null
+vibemeasure-cli import-codex --db $db --jsonl C:\path\to\rollout.jsonl
+dotnet run --project platforms/windows/VibeMeasure.Windows
 ```
 
-This repository was initially scaffolded on macOS, where `dotnet` was not installed, so Windows build validation must run on Windows. The project targets .NET 10 LTS and Microsoft.WindowsAppSDK 2.1.3, both selected from current Microsoft/NuGet public release information at scaffold time.
+Build on Windows with the .NET 10 SDK and the WinUI/Windows App SDK development tools. This project produces an unpackaged desktop application.

@@ -3,7 +3,7 @@ import SwiftUI
 @testable import VibeMeasureMac
 
 final class UsageWindowTests: XCTestCase {
-    func testExpiredCodexWindowResetsDisplayedUsage() {
+    func testExpiredCodexWindowWaitsForANewMeasurement() {
         let now = Date(timeIntervalSince1970: 1_000)
         let window = CodexRateLimitWindow(
             resetsAt: 999,
@@ -14,8 +14,8 @@ final class UsageWindowTests: XCTestCase {
         let preview = WindowPreview(codexWindow: window, now: now)
 
         XCTAssertEqual(preview.name, "5-Hour")
-        XCTAssertEqual(preview.percent, 0)
-        XCTAssertEqual(preview.percentText, "0%")
+        XCTAssertFalse(preview.hasKnownPercent)
+        XCTAssertEqual(preview.percentText, "—")
         XCTAssertEqual(preview.resetText, "Window reset; waiting for next Codex CLI event")
         XCTAssertTrue(preview.matches(displayMode: .fiveHours))
     }

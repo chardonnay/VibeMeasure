@@ -1,25 +1,17 @@
 # Architecture
 
-VibeMeasure uses a shared core plus thin native shells.
+The Rust CLI stores imported Codex measurements in SQLite. The macOS app can query that history or gather readings directly from four local providers.
 
 ```mermaid
 flowchart TD
-    User["User"]
-    NativeShells["Native shells: macOS, Windows, Linux"]
-    Widgets["Widgets: WidgetKit, Windows Widgets, GNOME, KDE"]
-    Core["vibemeasure-core"]
-    Store["SQLite database"]
-    Adapters["Provider adapters"]
-    Reports["XLSX/PDF reports"]
-    Sources["Verified local files, official APIs, manual settings"]
-
-    User --> NativeShells
-    NativeShells --> Core
-    Widgets --> Core
-    Core --> Store
-    Core --> Adapters
-    Adapters --> Sources
-    Core --> Reports
+    Logs["Codex session logs"] --> CLI["Rust CLI and core"]
+    CLI <--> DB["SQLite database"]
+    CLI --> Platforms["Windows, GNOME and KDE displays"]
+    CLI --> Exports["JSON, XLSX and PDF reports"]
+    Readers["macOS local readers and manual settings"] --> Mac["macOS app"]
+    DB --> Mac
+    Mac --> NativeExports["Native XLSX and PDF reports"]
+    Mac --> Widget["WidgetKit snapshot"]
 ```
 
 ## Responsibilities

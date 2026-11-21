@@ -1,28 +1,10 @@
 # OS Integration
 
-```mermaid
-flowchart LR
-    Core["Shared core snapshot"]
-    Mac["macOS MenuBarExtra"]
-    Win["Windows WinUI 3 tray app"]
-    Linux["Linux GTK/libadwaita shell"]
-    MacWidget["WidgetKit"]
-    WinWidget["Windows Widgets provider"]
-    Gnome["GNOME Shell extension"]
-    Kde["KDE Plasma widget"]
-
-    Core --> Mac
-    Core --> Win
-    Core --> Linux
-    Core --> MacWidget
-    Core --> WinWidget
-    Core --> Gnome
-    Core --> Kde
-```
+The macOS menu-bar app publishes local measurements to its WidgetKit extension. The Windows desktop window and the GNOME and KDE widgets read snapshots from the CLI database.
 
 ## macOS
 
-The first shell uses SwiftUI `MenuBarExtra`. WidgetKit source is present and must be attached to an Xcode widget extension target for packaging.
+The macOS app uses SwiftUI `MenuBarExtra`. The XcodeGen specification packages the WidgetKit extension with its host app. Both targets use a configurable shared App Group.
 
 Official references:
 
@@ -31,7 +13,7 @@ Official references:
 
 ## Windows
 
-The first shell uses WinUI 3, .NET 10 LTS, and Windows App SDK. Windows Widgets require a packaged provider model.
+The WinUI 3 desktop window uses .NET 10 and Windows App SDK. It reads current and historical periods through the Rust CLI. The Windows Widgets board requires a separate packaged provider.
 
 Official reference:
 
@@ -43,8 +25,8 @@ Official reference:
 
 Linux widgets are desktop-environment specific.
 
-- GNOME support starts as a Shell extension.
-- KDE support starts as a Plasma widget.
+- The GNOME Shell extension queries the database when its menu opens.
+- The KDE Plasma widget refreshes its usage snapshot once a minute.
 - GTK/libadwaita remains the native shell target for the main Linux app.
 
 Official references:

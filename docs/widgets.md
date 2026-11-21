@@ -1,25 +1,13 @@
-# Widgets
+# Widgets and desktop displays
 
-Widgets show a compact snapshot of selected provider windows. They must not perform privileged parsing or API calls directly. Native apps or background services write sanitized snapshots; widgets read those snapshots.
+## macOS
 
-All built-in LLM providers are hidden from widgets by default. A provider appears only after the user enables it in Settings.
+The signed menu-bar app publishes the providers enabled in Settings to its WidgetKit extension. The app writes `widget.json` atomically in the shared App Group and requests a timeline reload. The widget reads only this snapshot, shows the snapshot age, and requests another refresh after five minutes. All built-in providers start disabled.
 
-## User Configuration
+The package specification in [platforms/macos/project.yml](../platforms/macos/project.yml) builds the app and embeds the extension. See the [macOS build instructions](../platforms/macos/README.md) for signing and setup.
 
-The user can choose what appears in the widget:
+## GNOME, KDE and Windows
 
-- Providers.
-- Display mode.
-- Window types.
-- Cost visibility.
-- Currency.
-- Theme mode: system, light, or dark.
+The GNOME Shell menu, Plasma plasmoid and WinUI desktop window call `vibemeasure-cli snapshot --text` against an existing SQLite database. Imported usage and active quota windows appear automatically. Empty periods and read failures have distinct states. The Windows app supports each CLI comparison period, and the Linux widgets use provider cycles. Data refreshes when the database is queried again. Import new usage into that database to update what these surfaces can show.
 
-## Platform Notes
-
-- macOS: WidgetKit supports system widgets but requires an Xcode extension target.
-- Windows: Widgets use Windows App SDK provider packaging or PWA-backed widgets.
-- GNOME: Shell extensions provide panel/status UI; distribution varies by GNOME version.
-- KDE: Plasma widgets are packaged as plasmoids.
-
-The widget design should remain visually similar across platforms, but each platform uses its native widget API.
+See the [Linux](../platforms/linux/README.md) and [Windows](../platforms/windows/README.md) instructions for installation and database selection. A packaged Windows Widgets-board provider remains future work.
