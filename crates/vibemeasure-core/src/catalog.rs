@@ -92,6 +92,36 @@ pub fn required_tools() -> Vec<ToolDefinition> {
             display_name: "MiniMAX",
             command_hint: None,
         },
+        ToolDefinition {
+            id: "antigravity",
+            display_name: "Google Antigravity CLI",
+            command_hint: Some("agy"),
+        },
+        ToolDefinition {
+            id: "factory-droid",
+            display_name: "Factory Droid",
+            command_hint: Some("droid"),
+        },
+        ToolDefinition {
+            id: "cline",
+            display_name: "Cline",
+            command_hint: Some("cline"),
+        },
+        ToolDefinition {
+            id: "auggie",
+            display_name: "Augment Code / Auggie",
+            command_hint: Some("auggie"),
+        },
+        ToolDefinition {
+            id: "amp",
+            display_name: "Amp",
+            command_hint: Some("amp"),
+        },
+        ToolDefinition {
+            id: "openhands",
+            display_name: "OpenHands",
+            command_hint: Some("openhands"),
+        },
     ]
 }
 
@@ -106,7 +136,7 @@ mod tests {
     #[test]
     fn includes_every_required_tool() {
         let ids: Vec<_> = required_tools().into_iter().map(|tool| tool.id).collect();
-        assert_eq!(ids.len(), 17);
+        assert_eq!(ids.len(), 23);
         for id in [
             "claude",
             "codex",
@@ -125,6 +155,12 @@ mod tests {
             "mistral-vibe-cli",
             "deepseek-tui",
             "minimax",
+            "antigravity",
+            "factory-droid",
+            "cline",
+            "auggie",
+            "amp",
+            "openhands",
         ] {
             assert!(ids.contains(&id), "missing {id}");
         }

@@ -36,8 +36,14 @@ All required tools are present in the catalog:
 - Mistral Vibe CLI
 - DeepSeek TUI
 - MiniMAX
+- Google Antigravity CLI (`agy`)
+- Factory Droid (`droid`)
+- Cline (`cline`)
+- Augment Code / Auggie (`auggie`)
+- Amp (`amp`)
+- OpenHands (`openhands`)
 
-The Rust CLI imports Codex session logs into SQLite. Re-importing an unchanged session leaves the recorded totals unchanged. On macOS, four local readers collect Claude Code, Codex CLI, Gemini CLI, and MiniMAX data. The other thirteen catalog entries support manual configuration. The adapter guide describes the data each reader can supply and how to enable Claude's weekly quota capture.
+The Rust CLI imports Codex session logs into SQLite. Re-importing an unchanged session leaves the recorded totals unchanged. The macOS app has ten usage adapters. The adapter guide lists their sources, setup and supported measurements. The other 13 entries support manual configuration.
 
 The macOS app polls enabled local readers in the background. The default interval is five minutes and can be configured per provider. Windows, GNOME, and Plasma display snapshots from an existing CLI database. The macOS app can publish enabled provider windows to its bundled WidgetKit extension.
 

@@ -12,7 +12,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "VibeMeasureMac",
-            path: "VibeMeasureMac/Sources/VibeMeasureMac"
+            path: "VibeMeasureMac/Sources/VibeMeasureMac",
+            resources: [.process("Assets.xcassets")]
         ),
         .testTarget(
             name: "VibeMeasureMacTests",
