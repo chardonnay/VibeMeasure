@@ -31,7 +31,8 @@ PlasmoidItem {
     }
 
     compactRepresentation: Controls.ToolButton {
-        icon.name: "office-chart-bar"
+        icon.source: Qt.resolvedUrl("../images/pegelbot-symbolic.svg")
+        icon.color: palette.buttonText
         Accessible.name: i18n("VibeMeasure usage monitor")
         onClicked: root.expanded = !root.expanded
     }

@@ -5,6 +5,25 @@ import XCTest
 @testable import VibeMeasureMac
 
 final class HistoryAndSourceTests: XCTestCase {
+    @MainActor
+    func testPegelbotLoadsAsAMenuBarTemplate() throws {
+        let icon = StatusIcon.image
+        XCTAssertEqual(icon.size, CGSize(width: 18, height: 18))
+        XCTAssertTrue(icon.isTemplate)
+        XCTAssertNotNil(icon.tiffRepresentation)
+    }
+
+    @MainActor
+    func testBrandMarksLoadForBothAppearances() {
+        let ids = ["claude", "codex", "devin-terminal", "gemini", "opencode", "hermes", "kimi-cli",
+                   "cursor-agent", "qwen-code", "qoder-cli", "github-copilot-cli", "kiro-cli",
+                   "mistral-vibe-cli", "deepseek-tui", "minimax", "antigravity", "cline", "amp", "openhands"]
+        for id in ids {
+            XCTAssertNotNil(ProviderMark.logo(for: id, dark: false), id)
+            XCTAssertNotNil(ProviderMark.logo(for: id, dark: true), id)
+        }
+    }
+
     private func date(_ iso: String) throws -> Date {
         try XCTUnwrap(ISO8601DateFormatter().date(from: iso))
     }

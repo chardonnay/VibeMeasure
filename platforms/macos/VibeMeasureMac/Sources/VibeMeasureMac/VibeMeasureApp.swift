@@ -22,11 +22,20 @@ struct VibeMeasureApp: App {
     @AppStorage("usagePopoverHeight") private var usagePopoverHeight = 620.0
     @StateObject private var appModel = VibeMeasureAppModel()
 
+    #if SWIFT_PACKAGE
+    init() {
+        StatusIcon.setDevelopmentDockIcon()
+    }
+    #endif
+
     var body: some Scene {
-        MenuBarExtra("VibeMeasure", systemImage: "chart.bar.xaxis") {
+        MenuBarExtra {
             usageMonitorContent
-            .frame(width: UsageWindowMetrics.width, height: CGFloat(usagePopoverHeight))
-            .background(UsageWindowResizeConfigurator(height: $usagePopoverHeight))
+                .frame(width: UsageWindowMetrics.width, height: CGFloat(usagePopoverHeight))
+                .background(UsageWindowResizeConfigurator(height: $usagePopoverHeight))
+        } label: {
+            Image(nsImage: StatusIcon.image)
+                .accessibilityLabel("VibeMeasure")
         }
         .menuBarExtraStyle(.window)
 
@@ -288,7 +297,8 @@ final class UsageRefreshStore: ObservableObject {
         // Poll intervals and labels can change without invalidating a reading.
         let retainedIDs = Set(providers.filter { provider in
             provider.canReadLiveUsage && previous.contains {
-                $0.id == provider.id && $0.canReadLiveUsage && $0.commandHint == provider.commandHint
+                $0.id == provider.id && $0.canReadLiveUsage
+                    && $0.commandHint == provider.commandHint && $0.usagePath == provider.usagePath
             }
         }.map(\.id))
         inFlight = inFlight.filter { retainedIDs.contains($0.key) }
@@ -320,6 +330,19 @@ final class UsageRefreshStore: ObservableObject {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let result = Result { try Self.readUsage(for: provider) }
             Task { @MainActor [weak self] in
+                if provider.id == AdditionalProvider.droid.rawValue, case let .success(reading) = result {
+                    guard self?.inFlight[provider.id] == requestID else { return }
+                    let quotas = await AdditionalProvider.factoryAccountQuotas()
+                    if !quotas.isEmpty {
+                        let quotaNames = Set(quotas.map(\.name)).union(["Quota unavailable"])
+                        let windows = (reading?.windows ?? []).filter { !quotaNames.contains($0.name) } + quotas
+                        let updated = ProviderLiveUsage(status: reading == nil ? "API" : "Local + API",
+                                                        statusColor: .green, planName: reading?.planName,
+                                                        windows: windows, tokenHistory: reading?.tokenHistory ?? [])
+                        self?.finishPull(provider: provider, requestID: requestID, result: .success(updated))
+                        return
+                    }
+                }
                 self?.finishPull(provider: provider, requestID: requestID, result: result)
             }
         }
@@ -357,7 +380,7 @@ final class UsageRefreshStore: ObservableObject {
         case "minimax":
             try MiniMaxCliUsageReader(commandHint: provider.commandHint).readLatestUsage()
         default:
-            nil
+            try AdditionalProvider(rawValue: provider.id)?.read(path: provider.usagePath, commandHint: provider.commandHint)
         }
     }
 
@@ -452,8 +475,8 @@ struct UsagePopover: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: "chart.bar.fill")
-                .font(.title2)
+            Image(nsImage: StatusIcon.image)
+                .accessibilityHidden(true)
             Text("Usage Monitor")
                 .font(.title3.weight(.semibold))
             Spacer()
@@ -2388,8 +2411,7 @@ struct ProviderListRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: provider.symbolName)
-                .foregroundStyle(provider.isEnabled ? provider.dataSource.color : .secondary)
+            ProviderMark(provider: provider)
             VStack(alignment: .leading, spacing: 2) {
                 Text(provider.displayName)
                     .lineLimit(1)
@@ -2420,7 +2442,7 @@ struct ProviderEditor: View {
                 TextField("Display name", text: $provider.displayName)
                 TextField("Plan name", text: $provider.planName)
                 TextField("Command hint", text: $provider.commandHint)
-                TextField("SF Symbol", text: $provider.symbolName)
+                TextField(provider.isBuiltIn ? "SF Symbol override" : "SF Symbol", text: $provider.symbolName)
                 Picker("Data source", selection: $provider.dataSource) {
                     ForEach(provider.availableDataSources) { source in
                         Text(source.rawValue).tag(source)
@@ -2436,6 +2458,22 @@ struct ProviderEditor: View {
                     .frame(width: 130)
                 }
                 Toggle("Enabled in popover and widget", isOn: $provider.isEnabled)
+                if provider.dataSource == .localAdapter, let adapter = AdditionalProvider(rawValue: provider.id) {
+                    LabeledContent("Usage source") {
+                        VStack(alignment: .trailing, spacing: 6) {
+                            Text(provider.usagePath.isEmpty ? adapter.sourceHint : provider.usagePath)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            HStack {
+                                Button("Choose File or Folder…", action: chooseUsagePath)
+                                if !provider.usagePath.isEmpty {
+                                    Button("Use Default") { provider.usagePath = "" }
+                                }
+                            }
+                        }
+                    }
+                }
                 if provider.dataSource == .localAdapter && !provider.hasVerifiedLocalAdapter {
                     Text("No verified local usage adapter exists for this provider yet. Use manual windows for now.")
                         .font(.caption)
@@ -2467,6 +2505,16 @@ struct ProviderEditor: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private func chooseUsagePath() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            provider.usagePath = url.path
+        }
     }
 }
 
@@ -2517,7 +2565,7 @@ final class ProviderSettingsStore: ObservableObject {
 
     private let storageKey = "providerSettings.v1"
     private let storageVersionKey = "providerSettings.version"
-    private static let currentStorageVersion = 5
+    private static let currentStorageVersion = 6
 
     init() {
         var loadedProviders = loadProviders()
@@ -2534,6 +2582,15 @@ final class ProviderSettingsStore: ObservableObject {
         }
         if storedVersion < 5 {
             loadedProviders = Self.providersWithVerifiedAdapterDefaults(loadedProviders)
+        }
+        if storedVersion < 6 {
+            loadedProviders = loadedProviders.map { provider in
+                guard AdditionalProvider(rawValue: provider.id) != nil, provider.dataSource == .manual,
+                      provider.manualWindows.isEmpty else { return provider }
+                var migrated = provider
+                migrated.dataSource = .localAdapter
+                return migrated
+            }
         }
         if storedVersion < Self.currentStorageVersion {
             save(loadedProviders)
@@ -2638,8 +2695,19 @@ final class ProviderSettingsStore: ObservableObject {
             commandHint: "mmx",
             symbolName: "m.square",
             dataSource: .localAdapter
-        )
+        ),
+        .builtIn(id: "antigravity", displayName: "Google Antigravity CLI", commandHint: "agy", symbolName: "sparkles", dataSource: .localAdapter),
+        .builtIn(id: "factory-droid", displayName: "Factory Droid", commandHint: "droid", symbolName: "gearshape", dataSource: .localAdapter),
+        .builtIn(id: "cline", displayName: "Cline", commandHint: "cline", symbolName: "terminal", dataSource: .localAdapter),
+        .builtIn(id: "auggie", displayName: "Augment Code / Auggie", commandHint: "auggie", symbolName: "plus.circle", dataSource: .localAdapter),
+        .builtIn(id: "amp", displayName: "Amp", commandHint: "amp", symbolName: "waveform", dataSource: .localAdapter),
+        .builtIn(id: "openhands", displayName: "OpenHands", commandHint: "openhands", symbolName: "hand.raised", dataSource: .localAdapter),
     ]
+
+    static func usesDefaultMark(_ provider: ProviderSettings) -> Bool {
+        provider.isBuiltIn && (provider.symbolName.isEmpty ||
+            defaultProviders.contains { $0.id == provider.id && $0.symbolName == provider.symbolName })
+    }
 
     private static func providersWithMiniMaxAdapterDefaults(_ providers: [ProviderSettings]) -> [ProviderSettings] {
         providers.map { provider in
@@ -2681,6 +2749,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
     var displayName: String
     var planName: String
     var commandHint: String
+    var usagePath: String
     var symbolName: String
     var dataSource: ProviderDataSource
     var isBuiltIn: Bool
@@ -2693,6 +2762,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
         case displayName
         case planName
         case commandHint
+        case usagePath
         case symbolName
         case dataSource
         case isBuiltIn
@@ -2717,6 +2787,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
         self.displayName = displayName
         self.planName = planName
         self.commandHint = commandHint
+        self.usagePath = ""
         self.symbolName = symbolName
         self.dataSource = dataSource
         self.isBuiltIn = isBuiltIn
@@ -2731,6 +2802,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
         displayName = try container.decode(String.self, forKey: .displayName)
         planName = try container.decodeIfPresent(String.self, forKey: .planName) ?? ""
         commandHint = try container.decode(String.self, forKey: .commandHint)
+        usagePath = try container.decodeIfPresent(String.self, forKey: .usagePath) ?? ""
         symbolName = try container.decode(String.self, forKey: .symbolName)
         dataSource = try container.decode(ProviderDataSource.self, forKey: .dataSource)
         isBuiltIn = try container.decode(Bool.self, forKey: .isBuiltIn)
@@ -2791,7 +2863,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
     }
 
     var hasVerifiedLocalAdapter: Bool {
-        ["claude", "codex", "gemini", "minimax"].contains(id)
+        ["claude", "codex", "gemini", "minimax"].contains(id) || AdditionalProvider(rawValue: id) != nil
     }
 
     var canReadLiveUsage: Bool {

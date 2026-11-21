@@ -10,7 +10,8 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
         <StackPanel Orientation="Horizontal" Spacing="10">
-            <FontIcon Glyph="&#xE9D2;" />
+            <Image Source="ms-appx:///Assets/pegelbot.png" Width="28" Height="28"
+                   AutomationProperties.AccessibilityView="Raw" />
             <TextBlock Text="Usage Monitor" FontSize="20" FontWeight="SemiBold" />
         </StackPanel>
         <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="12">
