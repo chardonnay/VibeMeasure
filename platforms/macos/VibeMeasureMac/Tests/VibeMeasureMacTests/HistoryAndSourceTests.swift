@@ -6,6 +6,14 @@ import XCTest
 
 final class HistoryAndSourceTests: XCTestCase {
     @MainActor
+    func testPegelbotLoadsAsAMenuBarTemplate() throws {
+        let icon = StatusIcon.image
+        XCTAssertEqual(icon.size, CGSize(width: 18, height: 18))
+        XCTAssertTrue(icon.isTemplate)
+        XCTAssertNotNil(icon.tiffRepresentation)
+    }
+
+    @MainActor
     func testBrandMarksLoadForBothAppearances() {
         let ids = ["claude", "codex", "devin-terminal", "gemini", "opencode", "hermes", "kimi-cli",
                    "cursor-agent", "qwen-code", "qoder-cli", "github-copilot-cli", "kiro-cli",

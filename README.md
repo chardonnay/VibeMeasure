@@ -1,5 +1,7 @@
 # VibeMeasure
 
+<img src="assets/brand/pegelbot.svg" width="96" height="96" alt="Pegelbot, the VibeMeasure robot with three usage bars in its visor">
+
 VibeMeasure is a native desktop usage monitor for LLM coding tools. It is designed to show how many tokens have been used, which reset windows are active, which values are verified, and which values still need manual setup.
 
 ![VibeMeasure concept mockup](docs/assets/mockups/vibemeasure-concept.png)
@@ -99,7 +101,7 @@ dotnet run
 Linux:
 
 ```bash
-gnome-extensions pack platforms/linux/gnome/vibemeasure@chardonnay.example
+gnome-extensions pack --extra-source=pegelbot-symbolic.svg platforms/linux/gnome/vibemeasure@chardonnay.example
 kpackagetool6 --type Plasma/Applet --install platforms/linux/kde/org.vibemeasure.plasmoid
 ```
 

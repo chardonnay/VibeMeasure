@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>VibeMeasure Pegelbot</title>
+  <rect x="4" y="4" width="248" height="248" rx="54" fill="#0c4654"/>
+  <g fill="#a8f4b6">
+    <rect x="122" y="43" width="12" height="34" rx="4"/>
+    <circle cx="128" cy="39" r="17"/>
+    <rect x="47" y="69" width="162" height="159" rx="34"/>
+    <rect x="23" y="113" width="39" height="64" rx="17"/>
+    <rect x="194" y="113" width="39" height="64" rx="17"/>
+  </g>
+  <rect x="58" y="95" width="140" height="89" rx="21" fill="#0d273d"/>
+  <g fill="#bce12d">
+    <rect x="77" y="145" width="27" height="28" rx="5"/>
+    <rect x="114.5" y="128" width="27" height="45" rx="5"/>
+    <rect x="152" y="110" width="27" height="63" rx="5"/>
+  </g>
+  <path d="M110 203 Q128 222 146 203" fill="none" stroke="#0d273d" stroke-width="8" stroke-linecap="round"/>
+</svg>

@@ -14,6 +14,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "pegelbot.ico"));
         ready = true;
         timer.Tick += (_, _) => _ = RefreshAsync();
         Closed += (_, _) =>

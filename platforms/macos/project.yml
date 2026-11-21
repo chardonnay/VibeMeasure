@@ -15,6 +15,7 @@ targets:
     sources: [VibeMeasureMac/Sources/VibeMeasureMac]
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: org.vibemeasure.mac
+      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       ENABLE_APP_SANDBOX: NO
     info:
       path: Generated/App-Info.plist

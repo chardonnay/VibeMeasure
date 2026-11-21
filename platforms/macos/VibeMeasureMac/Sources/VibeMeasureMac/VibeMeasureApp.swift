@@ -22,11 +22,20 @@ struct VibeMeasureApp: App {
     @AppStorage("usagePopoverHeight") private var usagePopoverHeight = 620.0
     @StateObject private var appModel = VibeMeasureAppModel()
 
+    #if SWIFT_PACKAGE
+    init() {
+        StatusIcon.setDevelopmentDockIcon()
+    }
+    #endif
+
     var body: some Scene {
-        MenuBarExtra("VibeMeasure", systemImage: "chart.bar.xaxis") {
+        MenuBarExtra {
             usageMonitorContent
-            .frame(width: UsageWindowMetrics.width, height: CGFloat(usagePopoverHeight))
-            .background(UsageWindowResizeConfigurator(height: $usagePopoverHeight))
+                .frame(width: UsageWindowMetrics.width, height: CGFloat(usagePopoverHeight))
+                .background(UsageWindowResizeConfigurator(height: $usagePopoverHeight))
+        } label: {
+            Image(nsImage: StatusIcon.image)
+                .accessibilityLabel("VibeMeasure")
         }
         .menuBarExtraStyle(.window)
 
@@ -466,8 +475,8 @@ struct UsagePopover: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: "chart.bar.fill")
-                .font(.title2)
+            Image(nsImage: StatusIcon.image)
+                .accessibilityHidden(true)
             Text("Usage Monitor")
                 .font(.title3.weight(.semibold))
             Spacer()

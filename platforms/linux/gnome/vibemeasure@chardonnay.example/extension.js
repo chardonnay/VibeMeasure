@@ -10,7 +10,12 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 export default class VibeMeasureExtension extends Extension {
     enable() {
         this._indicator = new PanelMenu.Button(0.0, _('VibeMeasure'));
-        this._indicator.add_child(new St.Label({text: 'VM', y_align: Clutter.ActorAlign.CENTER}));
+        const icon = this.dir.get_child('pegelbot-symbolic.svg');
+        this._indicator.add_child(new St.Icon({
+            gicon: new Gio.FileIcon({file: icon}),
+            style_class: 'system-status-icon',
+            y_align: Clutter.ActorAlign.CENTER,
+        }));
         this._indicator.menu.addMenuItem(new PopupMenu.PopupMenuItem(_('Usage Monitor'), {reactive: false}));
         this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this._summary = new PopupMenu.PopupMenuItem(_('Loading usage…'), {reactive: false});

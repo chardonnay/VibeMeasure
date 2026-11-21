@@ -15,7 +15,7 @@ vibemeasure-cli snapshot --db "$db" --mode provider-cycles --text
 For GNOME, pack and install the extension for a supported Shell version. Enable it from Extensions. Opening the menu refreshes its contents, with another read each minute while open.
 
 ```bash
-gnome-extensions pack platforms/linux/gnome/vibemeasure@chardonnay.example
+gnome-extensions pack --extra-source=pegelbot-symbolic.svg platforms/linux/gnome/vibemeasure@chardonnay.example
 gnome-extensions install --force vibemeasure@chardonnay.example.shell-extension.zip
 ```
 
