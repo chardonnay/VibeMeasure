@@ -8,34 +8,24 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
-
         <StackPanel Orientation="Horizontal" Spacing="10">
             <FontIcon Glyph="&#xE9D2;" />
             <TextBlock Text="Usage Monitor" FontSize="20" FontWeight="SemiBold" />
         </StackPanel>
-
-        <RadioButtons Grid.Row="1" Header="Display mode" SelectedIndex="0">
-            <x:String>Provider cycles</x:String>
-            <x:String>5 hours</x:String>
-            <x:String>1 week</x:String>
-            <x:String>1 month</x:String>
-        </RadioButtons>
-
-        <StackPanel Grid.Row="2" Spacing="16">
-            <TextBlock Text="Provider data is loaded from verified adapters or manual settings. Unknown limits are not guessed." TextWrapping="Wrap" />
-            <ProgressBar Value="4" Maximum="100" />
-            <TextBlock Text="Claude Code · 5-Hour · Manual setup" />
-            <ProgressBar Value="1" Maximum="100" />
-            <TextBlock Text="Codex CLI · 5-Hour · Local token_count events" />
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="12">
+            <ComboBox x:Name="Mode" Header="Display mode" SelectedIndex="0"
+                      SelectionChanged="ModeChanged">
+                <ComboBoxItem Content="Provider cycles" Tag="provider-cycles" />
+                <ComboBoxItem Content="5 hours" Tag="five-hours" />
+                <ComboBoxItem Content="1 week" Tag="one-week" />
+                <ComboBoxItem Content="1 month" Tag="one-month" />
+            </ComboBox>
+            <Button Content="Refresh" VerticalAlignment="Bottom" Click="RefreshClicked" />
         </StackPanel>
-
-        <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="12" HorizontalAlignment="Right">
-            <Button Content="Refresh" />
-            <Button Content="Reports" />
-            <Button Content="Settings" />
-        </StackPanel>
+        <ScrollViewer Grid.Row="2">
+            <TextBlock x:Name="Summary" TextWrapping="Wrap" IsTextSelectionEnabled="True"
+                       AutomationProperties.LiveSetting="Polite" />
+        </ScrollViewer>
     </Grid>
 </Window>
-

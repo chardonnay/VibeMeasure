@@ -20,9 +20,9 @@ cargo run -p vibemeasure-cli -- snapshot --db vibemeasure.sqlite --mode provider
 
 What to check:
 
-- `codex` has local usage data.
+- A report for the fixture date range contains 130 Codex tokens, including after a second import of the same file.
 - Unknown providers are still present and marked for manual setup.
-- 5-hour and weekly Codex windows come from the fixture, not from guessed defaults.
+- The live snapshot omits expired fixture windows. Use an event with a future reset time to check active quota display.
 
 ## Currency Refresh
 

@@ -1,0 +1,49 @@
+name: VibeMeasure
+options:
+  deploymentTarget:
+    macOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: 1
+    VIBEMEASURE_APP_GROUP: group.org.vibemeasure.shared
+targets:
+  VibeMeasureMac:
+    type: application
+    platform: macOS
+    sources: [VibeMeasureMac/Sources/VibeMeasureMac]
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: org.vibemeasure.mac
+      ENABLE_APP_SANDBOX: NO
+    info:
+      path: Generated/App-Info.plist
+      properties:
+        VibeMeasureAppGroup: $(VIBEMEASURE_APP_GROUP)
+        CFBundleDisplayName: VibeMeasure
+    entitlements:
+      path: Generated/App.entitlements
+      properties:
+        com.apple.security.application-groups: ["$(VIBEMEASURE_APP_GROUP)"]
+    dependencies:
+      - target: VibeMeasureWidget
+        embed: true
+  VibeMeasureWidget:
+    type: app-extension
+    platform: macOS
+    sources: [Widget]
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: org.vibemeasure.mac.widget
+      SKIP_INSTALL: YES
+    info:
+      path: Generated/Widget-Info.plist
+      properties:
+        CFBundleDisplayName: VibeMeasure Widget
+        VibeMeasureAppGroup: $(VIBEMEASURE_APP_GROUP)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: Generated/Widget.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups: ["$(VIBEMEASURE_APP_GROUP)"]

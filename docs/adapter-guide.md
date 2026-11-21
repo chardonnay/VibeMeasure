@@ -1,53 +1,40 @@
 # Adapter Guide
 
-Provider adapters translate verified source data into shared core records.
+The macOS app reads enabled providers directly. Its reports can also read a database populated by the Rust CLI. The Windows, GNOME and KDE clients display snapshots from that database.
 
-```mermaid
-sequenceDiagram
-    participant UI as Native UI
-    participant Core as vibemeasure-core
-    participant Adapter as Provider Adapter
-    participant Source as Local file or official API
-    participant DB as SQLite
+## Implemented sources
 
-    UI->>Core: Refresh provider
-    Core->>Adapter: collect()
-    Adapter->>Source: Read verified source
-    Source-->>Adapter: Raw usage/limit data
-    Adapter-->>Core: UsageEvent and LimitWindow
-    Core->>DB: Persist with SourceMeta
-    Core-->>UI: Snapshot
+| Tool | macOS input | Measurements |
+|---|---|---|
+| Claude Code | Assistant usage records in local project transcripts, `claude auth status`, weekly status-line metadata | Recorded tokens, reported plan, overall and available model-specific weekly quotas |
+| Codex CLI | Session JSONL files in `sessions` and `archived_sessions` beneath `CODEX_HOME` (default `~/.codex`) | Per-session token increments, plan and reported quota windows |
+| Gemini CLI | Local chat JSONL events and messages in JSON session documents | Recorded tokens and the latest reported model |
+| MiniMAX | `mmx quota show --output json` | Current interval and weekly quota by reported category. The adapter reconciles the count with the reported remaining percentage. |
+
+Enable the provider and select **Local adapter** in the macOS settings. Missing readings and quota-only providers can have no dated token history. Unreported quota percentages appear as a dash. The Rust CLI separately imports Codex logs into SQLite using `import-codex`.
+
+### Claude weekly quota capture
+
+Claude Code sends its status-line payload to a command on standard input. To enable weekly quota collection, add the following entry to the **existing** Claude Code settings JSON, using the actual absolute script path. The helper requires Python 3. It writes only reported weekly percentages and reset timestamps, atomically, to `vibemeasure-weekly.json` under `CLAUDE_CONFIG_DIR` (default `~/.claude`). VibeMeasure picks it up on refresh.
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "python3 '/absolute/path/to/VibeMeasure/platforms/macos/scripts/capture-claude-statusline.py'"
+  }
+}
 ```
 
-## Initial Adapter State
+If an existing status-line script renders your prompt, append its executable and arguments to the capture command. It receives the original JSON on standard input and its output remains visible. For an existing shell pipeline, put that pipeline in an executable script and pass its path. A fresh status-line event is required after enabling capture. Token history and the reported plan can be available independently of quota capture. [Claude Code status line](https://code.claude.com/docs/en/statusline)
 
-Implemented:
+### Existing Codex databases
 
-- `claude`: scans local Claude Code data for verified `rate_limits` / `rateLimits` statusline payloads and maps any discovered 5-hour, 7-day, or monthly windows. It also displays a plan name when a local rate-limit or `claude auth status` payload exposes a plan/tier field. If no such local payload exists, no usage is shown.
-- `codex`: parses verified local Codex CLI `token_count` JSONL events, including `rate_limits.plan_type` for the active plan label when present.
-- `gemini`: parses local Gemini CLI chat session token totals from `~/.gemini/tmp/**/chats/*.json*`. This is usage-only because the verified local files observed during validation contain token totals and model names, but not quota/reset windows.
-- `minimax`: runs the official MiniMax CLI command `mmx quota show --output json` and maps the returned current-interval and weekly quota values into live windows. Every `model_remains` category reported by the CLI is displayed. Audio and music quota rows stay visible even when the CLI omits those categories, but they are labeled as not reported rather than assigned guessed usage or availability.
+The importer commits each log atomically and associates identified data with its session. Unchanged or appended logs can be imported again. It reconciles attributable records written by older versions. Historical duplicates without sufficient session identity may remain. To reconstruct exact historical totals in that case, import the original logs into a **new database** and retain the previous database, including its settings and price rules. Anonymous logs use their canonical file path as a fallback identity.
 
-macOS UI status:
+### Catalog entries without automatic readers
 
-- If the Claude Code provider is enabled and set to `Local adapter`, the macOS app reads local Claude Code JSON/JSONL data on the provider's configured pull interval and displays verified rate-limit windows only when a `rate_limits` or `rateLimits` payload is present. If a local Claude auth or rate-limit payload exposes a plan/tier field, that plan is shown under the provider name in the usage window. On the validation machine, `claude auth status` reported that Claude Code was not logged in and no local rate-limit payload was found, so the app correctly shows a data issue instead of guessing.
-- If the Codex provider is enabled and set to `Local adapter`, the macOS app reads `~/.codex/sessions` directly on the provider's configured pull interval and displays the latest verified 5-hour/weekly windows from Codex CLI `token_count` events. If `rate_limits.plan_type` exists, the normalized value is shown under the provider name in the usage window. If a Codex reset timestamp has passed and no newer `token_count` event exists yet, the expired window is displayed as `0%` instead of keeping the stale pre-reset usage value.
-- If the Gemini CLI provider is enabled and set to `Local adapter`, the macOS app reads Gemini CLI chat session files directly on the provider's configured pull interval and displays the latest model name plus token total. The local Gemini CLI files observed during validation do not contain an active plan name, quota, cost, or reset window, so those values remain manual/unknown.
-- If the MiniMAX provider is enabled and set to `Local adapter`, the macOS app runs `mmx quota show --output json` on the provider's configured pull interval and displays the current-interval and weekly windows reported by the CLI. MiniMAX windows show both used and available quota counts when the CLI provides totals. When `mmx` omits audio or music, the usage window still shows those rows with a clear "not reported" state. MiniMAX shows `Token Plan` as the verified plan family because the quota command reports Token Plan usage but does not expose the exact active tier name; users can override the plan name manually.
-- The default pull interval is 5 minutes and can be changed per provider in Settings.
-- If no `token_count` event exists yet, the popover shows a data issue instead of guessing.
-- If no Claude Code rate-limit payload or Gemini CLI token event exists yet, the popover shows a data issue instead of guessing.
-- If `mmx` is not installed, not authenticated, or returns a non-success response, the popover shows a data issue instead of guessing.
-
-Cataloged but manual/no-adapter until a verified source exists:
-
-- Devin for Terminal, OpenCode, Hermes, Kimi CLI, Cursor Agent, Qwen Code, Qoder CLI, GitHub Copilot CLI, Pi, Kiro CLI, Kilo, Mistral Vibe CLI, DeepSeek TUI.
-
-These remain manual or adapter-pending until a local format or official API is verified.
-
-Local validation on 2026-06-02 found only these provider commands installed in the development environment: `claude`, `codex`, `gemini`, `opencode`, `cursor-agent`, and `mmx`. `opencode --help` failed before producing usage data because the CLI could not create its state directory. The other required provider commands were not present in `PATH`, and no official local usage command or documented local quota schema was available in this repository context. The app must therefore keep those providers manual rather than invent endpoints or schemas.
-
-Cursor Agent note: this provider refers to Anysphere/Cursor's `cursor-agent` CLI documented at `docs.cursor.com` and distributed through Cursor's official `cursor.com` product surface. The local `~/.cursor/ai-tracking/ai-code-tracking.db` schema observed during validation contains AI-code tracking tables, not current token or quota usage. The Cursor CLI help and official CLI docs do not currently document a local quota command or plan-name output. Cursor remains manual/no-adapter until a verified source is available; users can store the active plan name manually in provider settings.
+Devin for Terminal, OpenCode, Hermes, Kimi CLI, Cursor Agent, Qwen Code, Qoder CLI, GitHub Copilot CLI, Pi, Kiro CLI, Kilo, Mistral Vibe CLI, and DeepSeek TUI are available for manual configuration. The app identifies manually supplied readings as manual. Available upstream commands and APIs require a VibeMeasure integration before their data appears automatically.
 
 ## Test Double Rule
 

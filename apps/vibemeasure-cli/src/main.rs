@@ -1,3 +1,6 @@
+mod display;
+mod pricing;
+
 use std::{path::PathBuf, process::ExitCode};
 
 use chrono::{DateTime, Utc};
@@ -7,7 +10,7 @@ use vibemeasure_core::{
     catalog::required_tools,
     currency::fetch_ecb_daily_rates,
     model::DisplayMode,
-    reports::{ReportRequest, build_usage_report, export_pdf, export_xlsx},
+    reports::{ReportRequest, build_priced_usage_report, export_pdf, export_xlsx},
     snapshot::build_widget_snapshot,
     store::VibeStore,
     windows::comparison_range,
@@ -39,7 +42,14 @@ enum Command {
         db: PathBuf,
         #[arg(long, value_enum, default_value_t = CliDisplayMode::ProviderCycles)]
         mode: CliDisplayMode,
+        /// Print human-readable live usage for desktop widgets.
+        #[arg(long)]
+        text: bool,
     },
+    /// Store manual USD prices per million tokens.
+    SetPrice(pricing::SetPrice),
+    /// Store a manual exchange rate for report estimates.
+    SetRate(pricing::SetRate),
     RefreshEcbRates {
         #[arg(long)]
         db: PathBuf,
@@ -51,7 +61,7 @@ enum Command {
         start: String,
         #[arg(long)]
         end: String,
-        #[arg(long, default_value = "USD")]
+        #[arg(long, default_value = "USD", value_parser = pricing::currency_code)]
         currency: String,
         #[arg(long)]
         xlsx: Option<PathBuf>,
@@ -103,33 +113,43 @@ fn run() -> vibemeasure_core::Result<()> {
         Command::ImportCodex { db, jsonl } => {
             let store = VibeStore::open(db)?;
             let output = parse_codex_jsonl(&jsonl)?;
-            for event in &output.usage_events {
-                store.insert_usage_event(event)?;
-            }
-            for window in &output.limit_windows {
-                store.insert_limit_window(window)?;
-            }
-            println!(
-                "imported {} usage events and {} limit windows",
-                output.usage_events.len(),
-                output.limit_windows.len()
-            );
+            let session_key = match &output.session_id {
+                Some(id) => format!("session:{id}"),
+                None => {
+                    let path = jsonl.canonicalize()?;
+                    format!(
+                        "file:{}",
+                        serde_json::to_string(path.as_os_str().as_encoded_bytes())?
+                    )
+                }
+            };
+            let (events, windows) = store.import_codex_session(&session_key, &output)?;
+            println!("imported {events} usage events and {windows} limit windows");
         }
-        Command::Snapshot { db, mode } => {
-            let store = VibeStore::open(db)?;
+        Command::Snapshot { db, mode, text } => {
+            let store = VibeStore::open_existing(db)?;
             let mode = DisplayMode::from(mode);
             let now = Utc::now();
             let usage_events = if let Some((start, end)) = comparison_range(&mode, now) {
                 store.usage_between(start, end)?
             } else {
-                store.usage_between(
-                    now - chrono::Duration::days(31),
-                    now + chrono::Duration::minutes(1),
-                )?
+                store.usage_between(now - chrono::Duration::days(31), now)?
             };
-            let windows = store.latest_limit_windows()?;
+            let windows = store.active_limit_windows_at(now)?;
             let snapshot = build_widget_snapshot(mode, now, &usage_events, &windows);
-            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            if text {
+                println!("{}", display::snapshot_text(&snapshot));
+            } else {
+                println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            }
+        }
+        Command::SetPrice(price) => {
+            price.save()?;
+            println!("saved manual token prices");
+        }
+        Command::SetRate(rate) => {
+            rate.save()?;
+            println!("saved manual exchange rate");
         }
         Command::RefreshEcbRates { db } => {
             let store = VibeStore::open(db)?;
@@ -147,17 +167,25 @@ fn run() -> vibemeasure_core::Result<()> {
             xlsx,
             pdf,
         } => {
-            let store = VibeStore::open(db)?;
             let starts_at = parse_datetime(&start)?;
             let ends_at = parse_datetime(&end)?;
+            if starts_at >= ends_at {
+                return Err(vibemeasure_core::VibeError::InvalidData(
+                    "report end must follow start".into(),
+                ));
+            }
+            let store = VibeStore::open_existing(db)?;
             let events = store.usage_between(starts_at, ends_at)?;
-            let report = build_usage_report(
+            let (rules, rates) = store.report_pricing()?;
+            let report = build_priced_usage_report(
                 ReportRequest {
                     starts_at,
                     ends_at,
                     currency,
                 },
                 &events,
+                &rules,
+                &rates,
             );
             if let Some(path) = xlsx {
                 export_xlsx(&report, path)?;
