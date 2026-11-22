@@ -259,7 +259,7 @@
                             AutomationProperties.Name="Settings" ToolTipService.ToolTip="Settings">
                         <FontIcon Glyph="&#xE713;" FontSize="17" />
                         <Button.Flyout>
-                            <Flyout Placement="BottomEdgeAlignedRight" Opened="SettingsOpened">
+                            <Flyout x:Name="SettingsFlyout" Placement="BottomEdgeAlignedRight" Opened="SettingsOpened">
                                 <StackPanel Width="270" Spacing="10">
                                     <TextBlock Text="Settings" Style="{StaticResource SubtitleTextBlockStyle}"
                                                AutomationProperties.HeadingLevel="Level2" />
@@ -267,6 +267,7 @@
                                                   Toggled="SettingsAutostartToggled" />
                                     <TextBlock x:Name="AutostartError" TextWrapping="Wrap" Visibility="Collapsed"
                                                AutomationProperties.LiveSetting="Polite" />
+                                    <Button Content="Notification settings…" Click="EditAlerts" />
                                     <TextBlock Text="Providers" FontWeight="SemiBold"
                                                AutomationProperties.HeadingLevel="Level3" />
                                     <ScrollViewer MaxHeight="275" VerticalScrollBarVisibility="Auto">

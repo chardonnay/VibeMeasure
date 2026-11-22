@@ -21,23 +21,59 @@ export default class VibeMeasureExtension extends Extension {
         this._summary = new PopupMenu.PopupMenuItem(_('Loading usage…'), {reactive: false});
         this._summary.label.clutter_text.single_line_mode = false;
         this._indicator.menu.addMenuItem(this._summary);
+        this._indicator.menu.addAction(_('Notification settings…'), () => this._editAlerts());
         this._indicator.menu.connect('open-state-changed', (_menu, open) => {
             if (open)
                 this._refresh();
         });
         this._timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 60, () => {
+            this._checkAlerts();
             if (this._indicator.menu.isOpen)
                 this._refresh();
             return GLib.SOURCE_CONTINUE;
         });
         Main.panel.addToStatusArea(this.uuid, this._indicator);
+        this._checkAlerts();
+    }
+
+    _checkAlerts() {
+        if (this._alertCheck || !GLib.file_test(this._database(), GLib.FileTest.IS_REGULAR))
+            return;
+        try {
+            const process = Gio.Subprocess.new(
+                ['vibemeasure-cli', 'check-alerts', '--db', this._database()], Gio.SubprocessFlags.NONE);
+            this._alertCheck = process;
+            process.wait_check_async(null, (_source, result) => {
+                if (this._alertCheck !== process)
+                    return;
+                this._alertCheck = null;
+                try { process.wait_check_finish(result); }
+                catch (error) { console.warn(`VibeMeasure alerts: ${error.message}`); }
+            });
+        } catch (error) { console.warn(`VibeMeasure alerts: ${error.message}`); }
+    }
+
+    _editAlerts() {
+        try {
+            const process = Gio.Subprocess.new(
+                ['vibemeasure-cli', 'alert-settings', '--edit', '--db', this._database()], Gio.SubprocessFlags.NONE);
+            process.wait_check_async(null, (_source, result) => {
+                try { process.wait_check_finish(result); } catch (error) {
+                    Main.notifyError(_('Could not open notification settings'), error.message);
+                }
+            });
+        } catch (error) { Main.notifyError(_('Could not open notification settings'), error.message); }
+    }
+
+    _database() {
+        return GLib.getenv('VIBEMEASURE_DB') ||
+            GLib.build_filenamev([GLib.get_user_data_dir(), 'vibemeasure', 'vibemeasure.sqlite']);
     }
 
     _refresh() {
         if (this._process)
             return;
-        const db = GLib.getenv('VIBEMEASURE_DB') ||
-            GLib.build_filenamev([GLib.get_user_data_dir(), 'vibemeasure', 'vibemeasure.sqlite']);
+        const db = this._database();
         if (!GLib.file_test(db, GLib.FileTest.IS_REGULAR)) {
             this._summary.label.text = _('No usage database. Import usage with vibemeasure-cli.');
             return;
@@ -66,6 +102,8 @@ export default class VibeMeasureExtension extends Extension {
 
     disable() {
         GLib.Source.remove(this._timer);
+        this._alertCheck?.force_exit();
+        this._alertCheck = null;
         this._process?.force_exit();
         this._process = null;
         this._indicator.destroy();

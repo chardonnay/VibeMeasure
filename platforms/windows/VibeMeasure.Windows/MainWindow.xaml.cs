@@ -18,6 +18,7 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMinutes(1) };
     private readonly AccessibilitySettings accessibility = new();
     private readonly StartupRegistration startup;
+    private readonly Action<string> deliverAlert;
     private readonly Dictionary<(string ToolId, bool Dark), ProviderMark> marks = new();
     private readonly string db;
     private readonly string codexHome = Environment.GetEnvironmentVariable("CODEX_HOME") is { Length: > 0 } home
@@ -33,13 +34,18 @@ public sealed partial class MainWindow : Window
     private bool sizedForData;
     private bool readingStartup;
 
-    internal MainWindow(string database, StartupRegistration startup)
+    internal MainWindow(string database, StartupRegistration startup, Action<string> deliverAlert)
     {
         db = database;
         this.startup = startup;
+        this.deliverAlert = deliverAlert;
         InitializeComponent();
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "pegelbot.ico"));
-        timer.Tick += (_, _) => _ = SyncAndRefreshAsync();
+        timer.Tick += (_, _) =>
+        {
+            _ = SyncAndRefreshAsync();
+            _ = CheckAlertsAsync();
+        };
         Closed += (_, _) =>
         {
             ready = false;
@@ -54,6 +60,7 @@ public sealed partial class MainWindow : Window
         if (ready) return;
         ready = true;
         timer.Start();
+        _ = CheckAlertsAsync();
         if (File.Exists(db)) _ = RefreshAsync();
         _ = SyncAndRefreshAsync();
     }
@@ -332,7 +339,11 @@ public sealed partial class MainWindow : Window
     }
 
     private static async Task<(int ExitCode, string Output)> RunCliAsync(
-        CancellationToken cancellation, params string[] arguments)
+        CancellationToken cancellation, params string[] arguments) =>
+        await RunCliProcessAsync(cancellation, arguments, null);
+
+    private static async Task<(int ExitCode, string Output)> RunCliProcessAsync(
+        CancellationToken cancellation, string[] arguments, Action<string>? notify)
     {
         var bundledCli = Path.Combine(AppContext.BaseDirectory, "vibemeasure-cli.exe");
         var start = new ProcessStartInfo(File.Exists(bundledCli) ? bundledCli : "vibemeasure-cli.exe")
@@ -340,6 +351,8 @@ public sealed partial class MainWindow : Window
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
+            RedirectStandardInput = notify is not null,
+            StandardInputEncoding = notify is null ? null : new UTF8Encoding(false),
             StandardOutputEncoding = Encoding.UTF8,
         };
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
@@ -351,7 +364,21 @@ public sealed partial class MainWindow : Window
             catch (InvalidOperationException) { /* The process already exited. */ }
             catch (Win32Exception) { /* Exit can race the cancellation callback. */ }
         });
-        var output = await process.StandardOutput.ReadToEndAsync(cancellation);
+        string output = "";
+        if (notify is null)
+        {
+            output = await process.StandardOutput.ReadToEndAsync(cancellation);
+        }
+        else
+        {
+            using var input = process.StandardInput;
+            while (await process.StandardOutput.ReadLineAsync(cancellation) is { } line)
+            {
+                notify(JsonSerializer.Deserialize<string>(line) ?? throw new JsonException("Missing alert text."));
+                await input.WriteLineAsync("ok");
+                await input.FlushAsync(cancellation);
+            }
+        }
         await process.WaitForExitAsync(cancellation);
         cancellation.ThrowIfCancellationRequested();
         return (process.ExitCode, output);

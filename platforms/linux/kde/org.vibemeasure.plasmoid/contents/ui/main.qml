@@ -11,7 +11,12 @@ PlasmoidItem {
     property string summary: i18n("Loading usage…")
 
     // Keep the path in the process environment, including when it contains spaces.
-    readonly property string snapshotCommand: "db=\"${VIBEMEASURE_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/vibemeasure/vibemeasure.sqlite}\"; " +
+    readonly property string databaseCommand: "db=\"${VIBEMEASURE_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/vibemeasure/vibemeasure.sqlite}\"; "
+    readonly property string alertCommand: databaseCommand +
+        "[ -f \"$db\" ] || exit 0; exec vibemeasure-cli check-alerts --db \"$db\""
+    readonly property string editorCommand: databaseCommand +
+        "exec vibemeasure-cli alert-settings --edit --db \"$db\""
+    readonly property string snapshotCommand: databaseCommand +
         "[ -f \"$db\" ] || exit 3; exec vibemeasure-cli snapshot --db \"$db\" --mode provider-cycles --text"
 
     Plasma5Support.DataSource {
@@ -30,6 +35,25 @@ PlasmoidItem {
         }
     }
 
+    Plasma5Support.DataSource {
+        engine: "executable"
+        connectedSources: [root.alertCommand]
+        interval: 60000
+        onNewData: function(source, data) {
+            if (data["exit code"]) console.warn("VibeMeasure alerts:", data.stderr)
+        }
+    }
+
+    Plasma5Support.DataSource {
+        id: editor
+        engine: "executable"
+        onNewData: function(source, data) {
+            if (data["exit code"] === undefined) return
+            disconnectSource(source)
+            if (data["exit code"]) root.summary = i18n("Could not open notification settings. Check that Python 3 and Tk are installed.")
+        }
+    }
+
     compactRepresentation: Controls.ToolButton {
         icon.source: Qt.resolvedUrl("../images/pegelbot-symbolic.svg")
         icon.color: palette.buttonText
@@ -43,6 +67,10 @@ PlasmoidItem {
         spacing: Kirigami.Units.smallSpacing
 
         Kirigami.Heading { text: i18n("Usage Monitor"); level: 3 }
+        Controls.Button {
+            text: i18n("Notification settings…")
+            onClicked: editor.connectSource(root.editorCommand)
+        }
         Controls.ScrollView {
             Layout.fillWidth: true
             Layout.fillHeight: true

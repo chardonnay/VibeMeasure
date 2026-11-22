@@ -150,7 +150,7 @@ enum AdditionalProvider: String {
                 let balance = expired ? nil : amount(bucket["remaining_amount"])?.formatted()
                 if remaining != nil || amount(bucket["remaining_amount"]) != nil {
                     result.quotas.append(WindowPreview(name: "\(key) quota", percent: expired ? nil : remaining.map { 1 - $0 },
-                                                       resetText: note, valueText: remaining == nil ? balance.map { "\($0) remaining" } : nil))
+                                                       resetText: note, valueText: remaining == nil ? balance.map { "\($0) remaining" } : nil, resetsAt: expiry))
                 }
             }
         case .droid:
@@ -328,7 +328,7 @@ enum AdditionalProvider: String {
                 let expired = reset.map { $0 <= now } ?? false
                 windows.append(WindowPreview(name: "\(label) · \(name)", percent: expired ? nil : percent / 100,
                                              resetText: reset.map { WindowPreview.resetText(resetsAt: $0, relativeTo: now) }
-                                                 ?? "Factory reported no reset date"))
+                                                 ?? "Factory reported no reset date", resetsAt: reset))
             }
         }
         if let cents = amount(data["extraUsageBalanceCents"]), data["extraUsageAllowed"] as? Bool == true {

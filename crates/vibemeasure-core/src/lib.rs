@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod alerts;
 pub mod catalog;
 pub mod currency;
 pub mod error;

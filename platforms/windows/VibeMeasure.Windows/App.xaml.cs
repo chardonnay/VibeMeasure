@@ -45,15 +45,15 @@ public partial class App : Application
 
         var startup = new StartupRegistration(Registry.CurrentUser,
             Path.Combine(AppContext.BaseDirectory, "VibeMeasure.Windows.exe"));
-        var dashboard = new MainWindow(database, startup);
+        var dispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+        tray = new TrayMenu(startup, ShowDashboard, () => dispatcher.TryEnqueue(Quit));
+        var dashboard = new MainWindow(database, startup, tray.ShowAlert);
         window = dashboard;
-        var dispatcher = dashboard.DispatcherQueue;
         activationWait = ThreadPool.RegisterWaitForSingleObject(signal, (_, _) =>
         {
             dispatcher.TryEnqueue(ShowDashboard);
         }, null, Timeout.Infinite, executeOnlyOnce: false);
 
-        tray = new TrayMenu(startup, ShowDashboard, () => dispatcher.TryEnqueue(Quit));
         dashboard.AppWindow.Closing += (_, close) =>
         {
             if (exiting) return;
