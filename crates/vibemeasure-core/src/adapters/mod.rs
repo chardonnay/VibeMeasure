@@ -1,10 +1,11 @@
+pub mod additional;
 pub mod codex;
 
 use std::path::Path;
 
 use crate::{
     Result,
-    model::{LimitWindow, UsageEvent},
+    model::{LimitWindow, ProviderPlan, UsageEvent},
 };
 
 #[derive(Clone, Debug, Default)]
@@ -14,6 +15,7 @@ pub struct AdapterOutput {
     /// Superseded Codex observations used only when reconciling older imports.
     pub superseded_usage: Vec<UsageEvent>,
     pub limit_windows: Vec<LimitWindow>,
+    pub reported_plan: Option<ProviderPlan>,
 }
 
 pub trait ProviderAdapter {

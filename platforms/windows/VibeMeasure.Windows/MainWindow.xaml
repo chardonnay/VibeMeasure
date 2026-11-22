@@ -2,31 +2,333 @@
     x:Class="VibeMeasure.Windows.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:VibeMeasure.Windows"
     Title="VibeMeasure">
-    <Grid Padding="18" RowSpacing="14">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-        </Grid.RowDefinitions>
-        <StackPanel Orientation="Horizontal" Spacing="10">
-            <Image Source="ms-appx:///Assets/pegelbot.png" Width="28" Height="28"
-                   AutomationProperties.AccessibilityView="Raw" />
-            <TextBlock Text="Usage Monitor" FontSize="20" FontWeight="SemiBold" />
-        </StackPanel>
-        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="12">
-            <ComboBox x:Name="Mode" Header="Display mode" SelectedIndex="0"
-                      SelectionChanged="ModeChanged">
-                <ComboBoxItem Content="Provider cycles" Tag="provider-cycles" />
-                <ComboBoxItem Content="5 hours" Tag="five-hours" />
-                <ComboBoxItem Content="1 week" Tag="one-week" />
-                <ComboBoxItem Content="1 month" Tag="one-month" />
-            </ComboBox>
-            <Button Content="Refresh" VerticalAlignment="Bottom" Click="RefreshClicked" />
-        </StackPanel>
-        <ScrollViewer Grid.Row="2">
-            <TextBlock x:Name="Summary" TextWrapping="Wrap" IsTextSelectionEnabled="True"
-                       AutomationProperties.LiveSetting="Polite" />
-        </ScrollViewer>
+    <Grid x:Name="Dashboard" RequestedTheme="Dark" Loaded="DashboardLoaded">
+        <Grid.Resources>
+            <ResourceDictionary>
+                <ResourceDictionary.ThemeDictionaries>
+                    <ResourceDictionary x:Key="Dark">
+                        <SolidColorBrush x:Key="DashboardBackground" Color="#202426" />
+                        <SolidColorBrush x:Key="DashboardDivider" Color="#3A4144" />
+                        <SolidColorBrush x:Key="DashboardSecondary" Color="#B6BDC0" />
+                        <SolidColorBrush x:Key="DashboardAccent" Color="#49D66C" />
+                        <SolidColorBrush x:Key="DashboardTrack" Color="#3C4346" />
+                        <SolidColorBrush x:Key="DashboardBadge" Color="#263C30" />
+                        <SolidColorBrush x:Key="DashboardBadgeBorder" Color="#3B6347" />
+                    </ResourceDictionary>
+                    <ResourceDictionary x:Key="Light">
+                        <SolidColorBrush x:Key="DashboardBackground" Color="#F6F7F9" />
+                        <SolidColorBrush x:Key="DashboardDivider" Color="#DCE0E3" />
+                        <SolidColorBrush x:Key="DashboardSecondary" Color="#526068" />
+                        <SolidColorBrush x:Key="DashboardAccent" Color="#087B35" />
+                        <SolidColorBrush x:Key="DashboardTrack" Color="#DCE0E3" />
+                        <SolidColorBrush x:Key="DashboardBadge" Color="#E3F3E8" />
+                        <SolidColorBrush x:Key="DashboardBadgeBorder" Color="#B9D7C3" />
+                    </ResourceDictionary>
+                    <ResourceDictionary x:Key="HighContrast">
+                        <SolidColorBrush x:Key="DashboardBackground" Color="{ThemeResource SystemColorWindowColor}" />
+                        <SolidColorBrush x:Key="DashboardDivider" Color="{ThemeResource SystemColorWindowTextColor}" />
+                        <SolidColorBrush x:Key="DashboardSecondary" Color="{ThemeResource SystemColorWindowTextColor}" />
+                        <SolidColorBrush x:Key="DashboardAccent" Color="{ThemeResource SystemColorWindowTextColor}" />
+                        <SolidColorBrush x:Key="DashboardTrack" Color="{ThemeResource SystemColorGrayTextColor}" />
+                        <SolidColorBrush x:Key="DashboardBadge" Color="{ThemeResource SystemColorWindowColor}" />
+                        <SolidColorBrush x:Key="DashboardBadgeBorder" Color="{ThemeResource SystemColorWindowTextColor}" />
+                    </ResourceDictionary>
+                </ResourceDictionary.ThemeDictionaries>
+
+                <Style x:Key="SecondaryText" TargetType="TextBlock">
+                    <Setter Property="Foreground" Value="{ThemeResource DashboardSecondary}" />
+                    <Setter Property="FontSize" Value="13" />
+                </Style>
+                <Style x:Key="ToolbarButton" TargetType="Button">
+                    <Setter Property="Width" Value="38" />
+                    <Setter Property="Height" Value="36" />
+                    <Setter Property="Padding" Value="0" />
+                    <Setter Property="CornerRadius" Value="8" />
+                    <Setter Property="HorizontalContentAlignment" Value="Center" />
+                </Style>
+
+                <DataTemplate x:Key="ProviderMarkTemplate" x:DataType="local:ProviderMark">
+                    <Grid Width="20" Height="20" AutomationProperties.AccessibilityView="Raw">
+                        <Border CornerRadius="4" Background="{x:Bind Background}" Padding="{x:Bind ImagePadding}"
+                                Visibility="{x:Bind ImageVisibility}">
+                            <Image Source="{x:Bind Image}" Stretch="Uniform" />
+                        </Border>
+                        <Border CornerRadius="4" Background="{x:Bind Background}" Visibility="{x:Bind LetterVisibility}">
+                            <TextBlock Text="{x:Bind Letter}" Foreground="{x:Bind Foreground}" FontSize="13"
+                                       FontWeight="ExtraBold" FontFamily="Consolas"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <FontIcon Glyph="&#xE756;" FontSize="17" Foreground="{ThemeResource DashboardSecondary}"
+                                  Visibility="{x:Bind GenericVisibility}" />
+                    </Grid>
+                </DataTemplate>
+
+                <DataTemplate x:Key="ProviderListItemTemplate" x:DataType="local:ProviderListItem">
+                    <StackPanel Orientation="Horizontal" Spacing="9" Margin="0,0,0,8">
+                        <ContentPresenter Content="{x:Bind Mark}" ContentTemplate="{StaticResource ProviderMarkTemplate}" />
+                        <TextBlock Text="{x:Bind Name}" TextWrapping="Wrap" VerticalAlignment="Center" />
+                    </StackPanel>
+                </DataTemplate>
+
+                <DataTemplate x:Key="QuotaTemplate" x:DataType="local:DashboardQuota">
+                    <Grid ColumnSpacing="{x:Bind ColumnSpacing}" MinHeight="27"
+                          ToolTipService.ToolTip="{x:Bind ResetDetails}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="{x:Bind LabelColumn}" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="{x:Bind ValueColumn}" />
+                            <ColumnDefinition Width="{x:Bind ResetColumn}" />
+                            <ColumnDefinition Width="{x:Bind CostColumn}" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="{x:Bind Label}" TextTrimming="CharacterEllipsis"
+                                   Style="{StaticResource SecondaryText}" VerticalAlignment="Center" />
+                        <Border Grid.Column="1" Height="8" CornerRadius="4" VerticalAlignment="Center"
+                                Background="{ThemeResource DashboardTrack}"
+                                Visibility="{x:Bind ProgressVisibility}" />
+                        <ProgressBar Grid.Column="1" Height="8" CornerRadius="4" BorderThickness="0"
+                                     Minimum="0" Maximum="100" Value="{x:Bind Progress}"
+                                     Foreground="{ThemeResource DashboardAccent}" Background="Transparent"
+                                     Visibility="{x:Bind ProgressVisibility}" VerticalAlignment="Center"
+                                     AutomationProperties.Name="{x:Bind AccessibleName}" RenderTransformOrigin="0.5,0.5">
+                            <ProgressBar.RenderTransform>
+                                <ScaleTransform ScaleY="2.6" />
+                            </ProgressBar.RenderTransform>
+                        </ProgressBar>
+                        <TextBlock Grid.Column="2" Text="{x:Bind Value}" FontSize="13" FontWeight="SemiBold"
+                                   Foreground="{ThemeResource DashboardAccent}" TextTrimming="CharacterEllipsis"
+                                   TextAlignment="Right" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="3" Text="{x:Bind ResetLabel}" Visibility="{x:Bind ResetVisibility}"
+                                   Style="{StaticResource SecondaryText}" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="4" Text="{x:Bind CostText}" Visibility="{x:Bind CostVisibility}"
+                                   ToolTipService.ToolTip="{x:Bind CostDetails}" FontSize="13" TextAlignment="Right"
+                                   TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                    </Grid>
+                </DataTemplate>
+
+                <DataTemplate x:Key="ReportedQuotaTemplate" x:DataType="local:DashboardReportedQuota">
+                    <StackPanel Spacing="3" Margin="0,0,0,8" ToolTipService.ToolTip="{x:Bind Details}"
+                                AutomationProperties.Name="{x:Bind Details}">
+                        <Grid ColumnSpacing="6">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{x:Bind Name}" Style="{StaticResource SecondaryText}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Grid.Column="1" Text="{x:Bind Value}" FontSize="12" FontWeight="SemiBold"
+                                       Foreground="{ThemeResource DashboardAccent}" />
+                        </Grid>
+                        <Grid Height="6" Visibility="{x:Bind ProgressVisibility}">
+                            <Border Background="{ThemeResource DashboardTrack}" CornerRadius="3" />
+                            <ProgressBar Minimum="0" Maximum="100" Value="{x:Bind Progress}" Height="6"
+                                         Foreground="{ThemeResource DashboardAccent}" Background="Transparent"
+                                         AutomationProperties.Name="{x:Bind Name}" RenderTransformOrigin="0.5,0.5">
+                                <ProgressBar.RenderTransform>
+                                    <ScaleTransform ScaleY="2" />
+                                </ProgressBar.RenderTransform>
+                            </ProgressBar>
+                        </Grid>
+                        <TextBlock Text="{x:Bind Reset}" Style="{StaticResource SecondaryText}"
+                                   TextWrapping="Wrap" Visibility="{x:Bind ResetVisibility}" />
+                    </StackPanel>
+                </DataTemplate>
+
+                <DataTemplate x:Key="ProviderTemplate" x:DataType="local:DashboardProvider">
+                    <Border Width="{x:Bind Width}" Padding="{x:Bind Padding}"
+                            BorderThickness="{x:Bind Divider}" BorderBrush="{ThemeResource DashboardDivider}">
+                        <StackPanel Spacing="7">
+                            <Grid ColumnSpacing="9">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="23" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <ContentPresenter Content="{x:Bind Mark}" ContentTemplate="{StaticResource ProviderMarkTemplate}"
+                                                  HorizontalAlignment="Left" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="{x:Bind Name}" FontWeight="SemiBold"
+                                           FontSize="{x:Bind NameSize}" ToolTipService.ToolTip="{x:Bind FullName}"
+                                           TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                                           AutomationProperties.Name="{x:Bind FullName}"
+                                           AutomationProperties.HeadingLevel="Level2" />
+                                <Border Grid.Row="{x:Bind PlanRow}" Grid.Column="{x:Bind PlanColumn}" MaxWidth="110"
+                                        HorizontalAlignment="Left" VerticalAlignment="Center" Margin="0,2"
+                                        Padding="8,2" CornerRadius="10" BorderThickness="1"
+                                        Background="{ThemeResource DashboardBadge}"
+                                        BorderBrush="{ThemeResource DashboardBadgeBorder}"
+                                        Visibility="{x:Bind PlanVisibility}"
+                                        ToolTipService.ToolTip="{x:Bind PlanDetails}">
+                                    <TextBlock Text="{x:Bind PlanName}" FontSize="12" FontWeight="SemiBold"
+                                               TextTrimming="CharacterEllipsis"
+                                               Foreground="{ThemeResource DashboardAccent}" />
+                                </Border>
+                                <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6"
+                                            VerticalAlignment="Center" Visibility="{x:Bind StatusVisibility}">
+                                    <Ellipse Width="7" Height="7" Fill="{ThemeResource DashboardAccent}" />
+                                    <TextBlock Text="Active" FontSize="13" Foreground="{ThemeResource DashboardAccent}" />
+                                </StackPanel>
+                            </Grid>
+                            <ItemsRepeater ItemsSource="{x:Bind Quotas}" ItemTemplate="{StaticResource QuotaTemplate}" />
+                            <ItemsRepeater ItemsSource="{x:Bind ReportedQuotas}" ItemTemplate="{StaticResource ReportedQuotaTemplate}" />
+                            <TextBlock Text="Quota unavailable" Style="{StaticResource SecondaryText}"
+                                       Visibility="{x:Bind ReportedQuotaUnavailable}" />
+                            <Grid ColumnSpacing="9">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{x:Bind TokenSummary}" Visibility="{x:Bind TokenVisibility}"
+                                           Style="{StaticResource SecondaryText}" TextWrapping="Wrap"
+                                           ToolTipService.ToolTip="{x:Bind TokenDetails}" />
+                                <TextBlock Grid.Row="{x:Bind CostRow}" Grid.Column="{x:Bind CostColumn}"
+                                           Text="{x:Bind CostText}" Visibility="{x:Bind CostVisibility}"
+                                           FontSize="13" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
+                                           ToolTipService.ToolTip="{x:Bind CostDetails}" />
+                            </Grid>
+                            <TextBlock Text="{x:Bind ReportedSummary}" Visibility="{x:Bind ReportedVisibility}"
+                                       Style="{StaticResource SecondaryText}" TextWrapping="Wrap"
+                                       ToolTipService.ToolTip="{x:Bind ReportedDetails}" />
+                        </StackPanel>
+                    </Border>
+                </DataTemplate>
+            </ResourceDictionary>
+        </Grid.Resources>
+
+        <Grid Background="{ThemeResource DashboardBackground}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Border BorderBrush="{ThemeResource DashboardDivider}" BorderThickness="0,0,0,1">
+                <Grid Padding="22,15" ColumnSpacing="9">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Grid ColumnSpacing="11">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="28" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Image Source="ms-appx:///Assets/pegelbot.png" Width="28" Height="28"
+                               AutomationProperties.AccessibilityView="Raw" />
+                        <TextBlock x:Name="Heading" Grid.Column="1" Text="Usage Monitor"
+                                   FontSize="21" FontWeight="SemiBold" VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis" AutomationProperties.HeadingLevel="Level1" />
+                    </Grid>
+
+                    <ComboBox x:Name="Mode" Grid.Column="1" SelectedIndex="0" MinWidth="134" MinHeight="36"
+                              AutomationProperties.Name="Display mode" SelectionChanged="ModeChanged">
+                        <ComboBoxItem Content="Provider cycles" Tag="provider-cycles" />
+                        <ComboBoxItem Content="5 hours" Tag="five-hours" />
+                        <ComboBoxItem Content="1 week" Tag="one-week" />
+                        <ComboBoxItem Content="1 month" Tag="one-month" />
+                    </ComboBox>
+                    <ComboBox x:Name="Currency" Grid.Column="2" SelectedIndex="0" MinWidth="70" MinHeight="36"
+                              AutomationProperties.Name="Estimate currency" SelectionChanged="ModeChanged">
+                        <ComboBoxItem Content="USD" Tag="USD" />
+                        <ComboBoxItem Content="EUR" Tag="EUR" />
+                    </ComboBox>
+                    <Button Grid.Column="3" Style="{StaticResource ToolbarButton}" Click="RefreshClicked"
+                            AutomationProperties.Name="Refresh" ToolTipService.ToolTip="Refresh">
+                        <FontIcon Glyph="&#xE72C;" FontSize="16" />
+                    </Button>
+                    <Button x:Name="LayoutButton" Grid.Column="4" Style="{StaticResource ToolbarButton}"
+                            Click="LayoutClicked" AutomationProperties.Name="Switch to wide view"
+                            ToolTipService.ToolTip="Switch to wide view">
+                        <FontIcon x:Name="LayoutIcon" Glyph="&#xECA5;" FontSize="17" />
+                    </Button>
+                    <Button Grid.Column="5" Style="{StaticResource ToolbarButton}"
+                            AutomationProperties.Name="Settings" ToolTipService.ToolTip="Settings">
+                        <FontIcon Glyph="&#xE713;" FontSize="17" />
+                        <Button.Flyout>
+                            <Flyout Placement="BottomEdgeAlignedRight" Opened="SettingsOpened">
+                                <StackPanel Width="270" Spacing="10">
+                                    <TextBlock Text="Settings" Style="{StaticResource SubtitleTextBlockStyle}"
+                                               AutomationProperties.HeadingLevel="Level2" />
+                                    <ToggleSwitch x:Name="SettingsAutostart" Header="Start with Windows"
+                                                  Toggled="SettingsAutostartToggled" />
+                                    <TextBlock x:Name="AutostartError" TextWrapping="Wrap" Visibility="Collapsed"
+                                               AutomationProperties.LiveSetting="Polite" />
+                                    <TextBlock Text="Providers" FontWeight="SemiBold"
+                                               AutomationProperties.HeadingLevel="Level3" />
+                                    <ScrollViewer MaxHeight="275" VerticalScrollBarVisibility="Auto">
+                                        <ItemsControl x:Name="SettingsProviders"
+                                                      ItemTemplate="{StaticResource ProviderListItemTemplate}" />
+                                    </ScrollViewer>
+                                </StackPanel>
+                            </Flyout>
+                        </Button.Flyout>
+                    </Button>
+                </Grid>
+            </Border>
+
+            <ScrollViewer x:Name="BodyScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                <StackPanel Padding="16,0">
+                    <InfoBar x:Name="Message" IsOpen="False" IsClosable="False"
+                             Visibility="Collapsed" Margin="0,14,0,14" />
+                    <ScrollViewer x:Name="ProviderScroll" HorizontalScrollMode="Disabled"
+                                  HorizontalScrollBarVisibility="Disabled" VerticalScrollMode="Disabled"
+                                  VerticalScrollBarVisibility="Disabled">
+                        <ItemsRepeater x:Name="Providers" ItemTemplate="{StaticResource ProviderTemplate}">
+                            <ItemsRepeater.Layout>
+                                <StackLayout x:Name="ProviderLayout" />
+                            </ItemsRepeater.Layout>
+                        </ItemsRepeater>
+                    </ScrollViewer>
+                </StackPanel>
+            </ScrollViewer>
+
+            <Expander x:Name="MoreProviders" Grid.Row="2" Header="More providers" ExpandDirection="Up"
+                      HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                      Margin="18,8" Visibility="Collapsed">
+                <ScrollViewer x:Name="MoreProviderScroll" MaxHeight="170" VerticalScrollBarVisibility="Auto">
+                    <StackPanel Spacing="9">
+                        <TextBlock Text="No measurements for these providers in this view." TextWrapping="Wrap"
+                                   Style="{StaticResource SecondaryText}" />
+                        <ItemsControl x:Name="UnmeasuredProviders"
+                                      ItemTemplate="{StaticResource ProviderListItemTemplate}" />
+                    </StackPanel>
+                </ScrollViewer>
+            </Expander>
+
+            <Border Grid.Row="3" BorderBrush="{ThemeResource DashboardDivider}" BorderThickness="0,1,0,0">
+                <Grid Padding="22,13" ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <Ellipse x:Name="StatusDot" Width="7" Height="7"
+                                 Fill="{ThemeResource DashboardAccent}" Opacity="0.45" />
+                        <TextBlock x:Name="StatusText" Text="Reading snapshot…" Style="{StaticResource SecondaryText}"
+                                   AutomationProperties.LiveSetting="Polite" />
+                    </StackPanel>
+                    <StackPanel x:Name="Updated" Grid.Column="1" Orientation="Horizontal" Spacing="7"
+                                VerticalAlignment="Center" Visibility="Collapsed">
+                        <FontIcon Glyph="&#xE823;" FontSize="14" Foreground="{ThemeResource DashboardSecondary}"
+                                  AutomationProperties.AccessibilityView="Raw" />
+                        <TextBlock x:Name="UpdatedText" Style="{StaticResource SecondaryText}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
     </Grid>
 </Window>

@@ -15,5 +15,13 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.1.3" />
     <Content Include="Assets\pegelbot.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Assets\pegelbot.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\macos\VibeMeasureMac\Sources\VibeMeasureMac\Assets.xcassets\**\mark*.png"
+             Link="Assets\Providers\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\macos\scripts\capture-antigravity-statusline.py"
+             Link="Tools\capture-antigravity-statusline.py"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
+    <EmbeddedResource Include="Assets\pegelbot.ico" LogicalName="VibeMeasure.TrayIcon" />
   </ItemGroup>
 </Project>

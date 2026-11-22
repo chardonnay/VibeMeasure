@@ -11,7 +11,7 @@ use crate::{
     store::VibeStore,
 };
 
-mod costs;
+pub(crate) mod costs;
 mod pdf;
 pub use costs::ReportCost;
 

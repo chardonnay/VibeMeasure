@@ -11,9 +11,12 @@ use serde_json::Value;
 use crate::{
     Result, VibeError,
     adapters::{AdapterOutput, ProviderAdapter},
-    model::{LimitWindow, SourceMeta, UsageEvent},
+    model::{LimitWindow, ProviderPlan, SourceMeta, UsageEvent},
     windows::infer_window_kind_from_minutes,
 };
+
+mod sync;
+pub use sync::{import_codex_file, sync_codex_sessions};
 
 #[derive(Clone, Debug, Default)]
 pub struct CodexAdapter;
@@ -29,24 +32,55 @@ impl ProviderAdapter for CodexAdapter {
 }
 
 pub fn parse_codex_jsonl(path: &Path) -> Result<AdapterOutput> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    parse_codex_records(BufReader::new(File::open(path)?), false).map(|(output, _)| output)
+}
+
+fn parse_codex_records(mut reader: impl BufRead, live: bool) -> Result<(AdapterOutput, bool)> {
     let mut output = AdapterOutput::default();
     let mut usage_tracker = UsageTracker::default();
     let mut model_name = None;
+    let mut line = Vec::new();
+    let mut line_number = 0;
 
-    for (line_index, line) in reader.lines().enumerate() {
-        let line = line?;
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok((output, false));
+        }
+        line_number += 1;
+        let live_tail = live && !line.ends_with(b"\n");
+        let line = match std::str::from_utf8(&line) {
+            Ok(line) => line,
+            Err(_) if live_tail => return Ok((output, true)),
+            Err(error) => {
+                return Err(VibeError::InvalidData(format!(
+                    "invalid UTF-8 on Codex JSONL line {line_number}: {error}"
+                )));
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
+        // Codex session logs also store large message and tool payloads. The live scanner
+        // only needs the records that establish session identity, model or measurements.
+        if live
+            && !live_tail
+            && !["\"session_meta\"", "\"turn_context\"", "\"token_count\""]
+                .into_iter()
+                .any(|kind| line.contains(kind))
+        {
+            continue;
+        }
 
-        let value: Value = serde_json::from_str(&line).map_err(|error| {
-            VibeError::InvalidData(format!(
-                "invalid Codex JSONL on line {}: {error}",
-                line_index + 1
-            ))
-        })?;
+        let value: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) if live_tail => return Ok((output, true)),
+            Err(error) => {
+                return Err(VibeError::InvalidData(format!(
+                    "invalid Codex JSONL on line {line_number}: {error}"
+                )));
+            }
+        };
 
         match value.get("type").and_then(Value::as_str) {
             Some("session_meta") if output.session_id.is_none() => {
@@ -70,6 +104,20 @@ pub fn parse_codex_jsonl(path: &Path) -> Result<AdapterOutput> {
 
         let occurred_at = parse_event_timestamp(&value)?;
         let source = SourceMeta::local("Codex CLI session JSONL token_count event", occurred_at);
+        if let Some(name) = value
+            .pointer("/payload/rate_limits/plan_type")
+            .and_then(Value::as_str)
+            .and_then(plan_name)
+            && output
+                .reported_plan
+                .as_ref()
+                .is_none_or(|plan| plan.source.fetched_at <= occurred_at)
+        {
+            output.reported_plan = Some(ProviderPlan {
+                name,
+                source: SourceMeta::local("Codex CLI rate_limits.plan_type", occurred_at),
+            });
+        }
         let last = TokenUsage::parse(value.pointer("/payload/info/last_token_usage"))?;
         let cumulative = TokenUsage::parse(value.pointer("/payload/info/total_token_usage"))?;
         let usage = usage_tracker.increment(last, cumulative)?;
@@ -83,13 +131,49 @@ pub fn parse_codex_jsonl(path: &Path) -> Result<AdapterOutput> {
         }
 
         for limit_name in ["primary", "secondary"] {
-            if let Some(window) = parse_limit_window(&value, limit_name, source.clone())? {
-                output.limit_windows.push(window);
+            match parse_limit_window(&value, limit_name, source.clone()) {
+                Ok(Some(window)) => output.limit_windows.push(window),
+                // Quota metadata is independent of the recorded tokens. A live
+                // import retains the measurements when a quota cannot be used.
+                Err(error) if !live => return Err(error),
+                _ => {}
             }
         }
     }
+}
 
-    Ok(output)
+fn plan_name(value: &str) -> Option<String> {
+    let name = value.trim();
+    if name.chars().count() > 48
+        || !name
+            .chars()
+            .all(|character| character.is_alphanumeric() || " _-+".contains(character))
+        || matches!(
+            name.to_ascii_lowercase().as_str(),
+            "" | "unknown" | "none" | "test-double"
+        )
+    {
+        return None;
+    }
+    if name.chars().any(char::is_uppercase) {
+        return Some(name.to_owned());
+    }
+    Some(
+        name.split([' ', '_', '-'])
+            .filter(|word| !word.is_empty())
+            .map(|word| {
+                let mut letters = word.chars();
+                letters
+                    .next()
+                    .unwrap_or_default()
+                    .to_uppercase()
+                    .to_string()
+                    + letters.as_str()
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+    .filter(|name| !name.is_empty())
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]

@@ -1,5 +1,8 @@
 use std::{fs, path::Path, process::Command};
 
+use chrono::{Duration, Utc};
+use serde_json::{Value, json};
+
 fn import(db: &Path, source: &Path) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_vibemeasure-cli"))
         .args(["import-codex", "--db"])
@@ -66,4 +69,125 @@ fn anonymous_fixture_can_be_reimported_and_snapshot_does_not_create_missing_data
         import(&db, &source).trim(),
         "imported 0 usage events and 0 limit windows"
     );
+}
+
+fn cli_json(db: &Path, command: &str, args: &[&str]) -> Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_vibemeasure-cli"))
+        .args([command, "--db"])
+        .arg(db)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn automatic_import_retries_partial_logs_and_updates_priced_snapshots_without_duplicates() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = directory.path().join("profile").join("usage.sqlite");
+    let root = directory.path().join("codex");
+    let sessions = root.join("sessions").join("2026");
+    let archive = root.join("archived_sessions");
+    let sync = || cli_json(&db, "sync-codex", &["--codex-home", root.to_str().unwrap()]);
+    assert_eq!(sync()["source_found"], false);
+    assert!(!db.exists());
+    fs::create_dir_all(&sessions).unwrap();
+    fs::create_dir_all(&archive).unwrap();
+
+    let now = Utc::now();
+    let event = |minutes: i64, last: u64, total: u64| {
+        json!({
+            "type": "event_msg",
+            "timestamp": (now - Duration::minutes(minutes)).to_rfc3339(),
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {"input_tokens": last, "total_tokens": last},
+                    "total_token_usage": {"input_tokens": total, "total_tokens": total}
+                },
+                "rate_limits": {
+                    "plan_type": "plus",
+                    "primary": {
+                        "window_minutes": 300,
+                        "used_percent": 33,
+                        "resets_at": (now + Duration::hours(3)).timestamp()
+                    },
+                    "secondary": {
+                        "window_minutes": 0,
+                        "used_percent": 0,
+                        "resets_at": (now + Duration::hours(3)).timestamp()
+                    }
+                }
+            }
+        })
+        .to_string()
+    };
+    let first = event(3, 100, 100);
+    let append = event(1, 50, 150);
+    let head = format!(
+        "{}\n{}\n{first}\n",
+        json!({"type": "session_meta", "payload": {"id": "automatic"}}),
+        json!({"type": "turn_context", "payload": {"model": "fixture-model"}}),
+    );
+    let path = sessions.join("rollout-first.jsonl");
+    fs::write(&path, format!("{head}{}", &append[..append.len() / 2])).unwrap();
+    let invalid = archive.join("rollout-invalid.jsonl");
+    fs::write(&invalid, "{\"type\":\"token_count\" broken}\n").unwrap();
+    fs::write(sessions.join("other.jsonl"), &first).unwrap();
+
+    let initial = sync();
+    assert_eq!(initial["imported_files"], 1);
+    assert_eq!(initial["deferred_files"], 1);
+    assert_eq!(initial["unreadable_files"], 1);
+    assert_eq!(sync()["imported_files"], 0);
+
+    let price = Command::new(env!("CARGO_BIN_EXE_vibemeasure-cli"))
+        .args(["set-price", "--db"])
+        .arg(&db)
+        .args([
+            "--tool",
+            "codex",
+            "--provider",
+            "fixture",
+            "--model",
+            "fixture-model",
+            "--input",
+            "2",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        price.status.success(),
+        "{}",
+        String::from_utf8_lossy(&price.stderr)
+    );
+
+    let codex = || {
+        cli_json(&db, "snapshot", &[])["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|provider| provider["tool_id"] == "codex")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(codex()["usage"]["total_tokens"], 100);
+    fs::write(&path, format!("{head}{append}")).unwrap();
+    let changed = sync();
+    assert_eq!(changed["imported_files"], 1);
+    assert_eq!(changed["deferred_files"], 0);
+    assert_eq!(codex()["usage"]["total_tokens"], 150);
+    assert_eq!(codex()["plan"]["name"], "Plus");
+    assert_eq!(codex()["windows"].as_array().unwrap().len(), 1);
+    assert!((codex()["estimated_cost"]["amount"].as_f64().unwrap() - 0.0003).abs() < 1e-10);
+
+    fs::rename(&path, archive.join("rollout-first.jsonl")).unwrap();
+    assert_eq!(sync()["imported_files"], 1);
+    assert_eq!(sync()["imported_files"], 0);
+    assert_eq!(codex()["usage"]["total_tokens"], 150);
 }

@@ -17,6 +17,7 @@ pub fn snapshot_text(snapshot: &WidgetSnapshot) -> String {
             lines.push(format!("{} tokens · {period}", provider.usage.total_tokens));
         }
         for window in &provider.windows {
+            let window = &window.limit;
             let label = match window.window_kind {
                 WindowKind::FiveHours => "5 hours".into(),
                 WindowKind::OneWeek => "1 week".into(),

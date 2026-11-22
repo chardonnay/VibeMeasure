@@ -1,6 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
   <title>VibeMeasure Pegelbot</title>
-  <rect x="4" y="4" width="248" height="248" rx="54" fill="#0c4654"/>
   <g fill="#a8f4b6">
     <rect x="122" y="43" width="12" height="34" rx="4"/>
     <circle cx="128" cy="39" r="17"/>

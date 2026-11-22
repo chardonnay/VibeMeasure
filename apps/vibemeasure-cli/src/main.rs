@@ -6,14 +6,14 @@ use std::{path::PathBuf, process::ExitCode};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use vibemeasure_core::{
-    adapters::codex::parse_codex_jsonl,
+    adapters::additional,
+    adapters::codex::{import_codex_file, sync_codex_sessions},
     catalog::required_tools,
     currency::fetch_ecb_daily_rates,
     model::DisplayMode,
     reports::{ReportRequest, build_priced_usage_report, export_pdf, export_xlsx},
-    snapshot::build_widget_snapshot,
+    snapshot::read_widget_snapshot,
     store::VibeStore,
-    windows::comparison_range,
 };
 
 #[derive(Parser)]
@@ -37,17 +37,33 @@ enum Command {
         #[arg(long)]
         jsonl: PathBuf,
     },
+    /// Import new or changed Codex logs from the last 31 days and print a JSON summary.
+    SyncCodex {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        codex_home: PathBuf,
+    },
+    /// Refresh the six additional providers from local records and available account sources.
+    SyncProviders {
+        #[arg(long)]
+        db: PathBuf,
+    },
     Snapshot {
         #[arg(long)]
         db: PathBuf,
         #[arg(long, value_enum, default_value_t = CliDisplayMode::ProviderCycles)]
         mode: CliDisplayMode,
+        #[arg(long, default_value = "USD", value_parser = pricing::currency_code)]
+        currency: String,
         /// Print human-readable live usage for desktop widgets.
         #[arg(long)]
         text: bool,
     },
     /// Store manual USD prices per million tokens.
     SetPrice(pricing::SetPrice),
+    /// Store a plan label from your subscription settings.
+    SetPlan(pricing::SetPlan),
     /// Store a manual exchange rate for report estimates.
     SetRate(pricing::SetRate),
     RefreshEcbRates {
@@ -112,31 +128,24 @@ fn run() -> vibemeasure_core::Result<()> {
         }
         Command::ImportCodex { db, jsonl } => {
             let store = VibeStore::open(db)?;
-            let output = parse_codex_jsonl(&jsonl)?;
-            let session_key = match &output.session_id {
-                Some(id) => format!("session:{id}"),
-                None => {
-                    let path = jsonl.canonicalize()?;
-                    format!(
-                        "file:{}",
-                        serde_json::to_string(path.as_os_str().as_encoded_bytes())?
-                    )
-                }
-            };
-            let (events, windows) = store.import_codex_session(&session_key, &output)?;
+            let (events, windows) = import_codex_file(&store, &jsonl)?;
             println!("imported {events} usage events and {windows} limit windows");
         }
-        Command::Snapshot { db, mode, text } => {
+        Command::SyncCodex { db, codex_home } => {
+            let result = sync_codex_sessions(&db, &codex_home)?;
+            println!("{}", serde_json::to_string(&result)?);
+        }
+        Command::SyncProviders { db } => {
+            println!("{}", serde_json::to_string(&additional::sync(&db)?)?);
+        }
+        Command::Snapshot {
+            db,
+            mode,
+            currency,
+            text,
+        } => {
             let store = VibeStore::open_existing(db)?;
-            let mode = DisplayMode::from(mode);
-            let now = Utc::now();
-            let usage_events = if let Some((start, end)) = comparison_range(&mode, now) {
-                store.usage_between(start, end)?
-            } else {
-                store.usage_between(now - chrono::Duration::days(31), now)?
-            };
-            let windows = store.active_limit_windows_at(now)?;
-            let snapshot = build_widget_snapshot(mode, now, &usage_events, &windows);
+            let snapshot = read_widget_snapshot(&store, mode.into(), Utc::now(), &currency)?;
             if text {
                 println!("{}", display::snapshot_text(&snapshot));
             } else {
@@ -146,6 +155,10 @@ fn run() -> vibemeasure_core::Result<()> {
         Command::SetPrice(price) => {
             price.save()?;
             println!("saved manual token prices");
+        }
+        Command::SetPlan(plan) => {
+            plan.save()?;
+            println!("saved manual plan");
         }
         Command::SetRate(rate) => {
             rate.save()?;

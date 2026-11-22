@@ -1,8 +1,14 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 
 use crate::{
+    Result,
+    adapters::additional,
     catalog::required_tools,
-    model::{DisplayMode, LimitWindow, ProviderSnapshot, UsageEvent, WidgetSnapshot, WindowKind},
+    model::{
+        DisplayMode, LimitWindow, ProviderSnapshot, SnapshotWindow, UsageEvent, WidgetSnapshot,
+        WindowKind,
+    },
+    reports::costs::estimate,
     store::VibeStore,
     windows::comparison_range,
 };
@@ -44,7 +50,10 @@ pub fn build_widget_snapshot(
                         && now < window.ends_at
                         && now < window.reset_at
                 })
-                .cloned()
+                .map(|window| SnapshotWindow {
+                    limit: window.clone(),
+                    estimated_cost: None,
+                })
                 .collect::<Vec<_>>();
             let needs_manual_setup = windows.is_empty() && tool_events.is_empty();
 
@@ -54,6 +63,9 @@ pub fn build_widget_snapshot(
                 windows,
                 usage: VibeStore::aggregate_usage(&tool_events, tool.id),
                 needs_manual_setup,
+                plan: None,
+                estimated_cost: None,
+                reported: None,
             }
         })
         .collect();
@@ -62,7 +74,73 @@ pub fn build_widget_snapshot(
         generated_at: now,
         display_mode: mode,
         providers,
+        currency: None,
     }
+}
+
+pub fn read_widget_snapshot(
+    store: &VibeStore,
+    mode: DisplayMode,
+    now: DateTime<Utc>,
+    currency: &str,
+) -> Result<WidgetSnapshot> {
+    let (start, end) = comparison_range(&mode, now).unwrap_or((now - Duration::days(31), now));
+    let windows = if mode == DisplayMode::ProviderCycles {
+        store.active_limit_windows_at(now)?
+    } else {
+        Vec::new()
+    };
+    let earliest = windows
+        .iter()
+        .filter(|window| window.tool_id != "claude" || window.window_kind == WindowKind::OneWeek)
+        .fold(start, |date, window| date.min(window.starts_at));
+    let events = store.usage_between(earliest, end)?;
+    let display_events = &events[events.partition_point(|event| event.occurred_at < start)..];
+    let mut snapshot = build_widget_snapshot(mode, now, display_events, &windows);
+    let (rules, rates) = store.report_pricing()?;
+    let readings = additional::load(store)?;
+    snapshot.currency = Some(currency.to_owned());
+
+    for provider in &mut snapshot.providers {
+        provider.plan = store.provider_plan(&provider.tool_id, now)?;
+        if let Some(reading) = readings.get(&provider.tool_id) {
+            if let Some(plan) = reading.plan() {
+                provider.plan = Some(plan);
+            }
+            provider.reported = reading.reported(&provider.tool_id, now);
+            if let Some(tokens) = reading.dated_tokens(start, end)
+                && let Some(reported) = &provider.reported
+            {
+                provider.usage.total_tokens = provider.usage.total_tokens.saturating_add(tokens);
+                provider
+                    .usage
+                    .source_labels
+                    .push(reported.source.label.clone());
+            }
+        }
+        if provider.needs_manual_setup {
+            provider.needs_manual_setup = provider.reported.is_none();
+            continue;
+        }
+        let tool = provider.tool_id.as_str();
+        let usage_in = |range_start, range_end| {
+            events.iter().filter(move |event| {
+                event.tool_id == tool
+                    && event.occurred_at >= range_start
+                    && event.occurred_at < range_end
+            })
+        };
+        provider.estimated_cost = Some(estimate(usage_in(start, end), &rules, &rates, currency));
+        for window in &mut provider.windows {
+            window.estimated_cost = Some(estimate(
+                usage_in(window.limit.starts_at, now),
+                &rules,
+                &rates,
+                currency,
+            ));
+        }
+    }
+    Ok(snapshot)
 }
 
 #[cfg(test)]
@@ -93,8 +171,10 @@ mod tests {
         let windows = vec![weekly.clone(), short, codex.clone()];
         let snapshot = build_widget_snapshot(DisplayMode::ProviderCycles, now, &[], &windows);
         let provider = |id| snapshot.providers.iter().find(|p| p.tool_id == id).unwrap();
-        assert_eq!(provider("claude").windows, vec![weekly]);
-        assert_eq!(provider("codex").windows, vec![codex]);
+        assert_eq!(provider("claude").windows.len(), 1);
+        assert_eq!(provider("claude").windows[0].limit, weekly);
+        assert_eq!(provider("codex").windows.len(), 1);
+        assert_eq!(provider("codex").windows[0].limit, codex);
         for mode in [
             DisplayMode::FiveHours,
             DisplayMode::OneWeek,

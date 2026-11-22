@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::reports::ReportCost;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayMode {
@@ -143,12 +145,63 @@ pub struct UsageSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderPlan {
+    pub name: String,
+    pub source: SourceMeta,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotWindow {
+    #[serde(flatten)]
+    pub limit: LimitWindow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost: Option<ReportCost>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderSnapshot {
     pub tool_id: String,
     pub display_name: String,
-    pub windows: Vec<LimitWindow>,
+    pub windows: Vec<SnapshotWindow>,
     pub usage: UsageSummary,
     pub needs_manual_setup: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<ProviderPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost: Option<ReportCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported: Option<ReportedUsage>,
+}
+
+/// Provider-native readings whose scope may differ from the selected calendar period.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReportedUsage {
+    pub tokens: Option<u64>,
+    pub conversation_tokens: bool,
+    pub estimated_usd: Option<f64>,
+    pub credits: Option<f64>,
+    pub credit_unit: Option<String>,
+    pub quotas: Vec<ReportedQuota>,
+    pub source: SourceMeta,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReportedQuota {
+    pub name: String,
+    pub used_percent: Option<f64>,
+    pub resets_at: Option<DateTime<Utc>>,
+    pub value: Option<f64>,
+    pub unit: Option<ReportedQuotaUnit>,
+    pub detail: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportedQuotaUnit {
+    Remaining,
+    UsdRemaining,
+    Credits,
+    UsdSpent,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -156,4 +209,6 @@ pub struct WidgetSnapshot {
     pub generated_at: DateTime<Utc>,
     pub display_mode: DisplayMode,
     pub providers: Vec<ProviderSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
 }

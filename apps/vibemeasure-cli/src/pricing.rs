@@ -5,7 +5,7 @@ use clap::Args;
 use vibemeasure_core::{
     Result, VibeError,
     catalog::tool_by_id,
-    model::{CurrencyRate, PricingRule, SourceMeta},
+    model::{CurrencyRate, PricingRule, ProviderPlan, SourceMeta},
     store::VibeStore,
 };
 
@@ -58,6 +58,41 @@ impl SetPrice {
             billing_window: None,
             source: SourceMeta::manual(self.source, Utc::now()),
         })
+    }
+}
+
+#[derive(Args)]
+pub struct SetPlan {
+    #[arg(long)]
+    db: PathBuf,
+    /// Tool ID as shown by the catalog command.
+    #[arg(long)]
+    tool: String,
+    /// Plan as shown in the provider's subscription settings.
+    #[arg(long, value_parser = nonempty)]
+    name: String,
+}
+
+impl SetPlan {
+    pub fn save(self) -> Result<()> {
+        if tool_by_id(&self.tool).is_none() {
+            return Err(VibeError::InvalidData(format!(
+                "unknown catalog tool: {}",
+                self.tool
+            )));
+        }
+        if self.name.chars().count() > 48 || self.name.chars().any(char::is_control) {
+            return Err(VibeError::InvalidData(
+                "plan names must fit on one line (up to 48 characters)".into(),
+            ));
+        }
+        VibeStore::open(&self.db)?.save_manual_plan(
+            &self.tool,
+            &ProviderPlan {
+                name: self.name,
+                source: SourceMeta::manual("Manual CLI plan", Utc::now()),
+            },
+        )
     }
 }
 

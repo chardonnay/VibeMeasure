@@ -8,7 +8,7 @@ use rusqlite::{
 use crate::{
     Result,
     adapters::AdapterOutput,
-    model::{CurrencyRate, LimitWindow, PricingRule, UsageEvent, UsageSummary},
+    model::{CurrencyRate, LimitWindow, PricingRule, ProviderPlan, UsageEvent, UsageSummary},
 };
 
 pub struct VibeStore {
@@ -232,6 +232,13 @@ impl VibeStore {
                 &mut superseded_occurrences,
                 || Ok(self.legacy_usage_id(event)?.map(|id| (id, false))),
             )?;
+        }
+        if let Some(plan) = &output.reported_plan {
+            let key = "plan.reported.codex";
+            let previous: Option<ProviderPlan> = self.load_setting(key)?;
+            if previous.is_none_or(|current| current.source.fetched_at < plan.source.fetched_at) {
+                self.save_setting(key, plan)?;
+            }
         }
         transaction.commit()?;
         Ok((added_events, added_windows))
@@ -461,6 +468,19 @@ impl VibeStore {
         raw.map(|value| serde_json::from_str(&value))
             .transpose()
             .map_err(Into::into)
+    }
+
+    pub fn save_manual_plan(&self, tool_id: &str, plan: &ProviderPlan) -> Result<()> {
+        self.save_setting(&format!("plan.manual.{tool_id}"), plan)
+    }
+
+    pub fn provider_plan(&self, tool_id: &str, now: DateTime<Utc>) -> Result<Option<ProviderPlan>> {
+        let reported: Option<ProviderPlan> =
+            self.load_setting(&format!("plan.reported.{tool_id}"))?;
+        if let Some(plan) = reported.filter(|plan| plan.source.fetched_at <= now) {
+            return Ok(Some(plan));
+        }
+        self.load_setting(&format!("plan.manual.{tool_id}"))
     }
 
     pub fn usage_between(

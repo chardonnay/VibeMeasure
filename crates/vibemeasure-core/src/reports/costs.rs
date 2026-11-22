@@ -120,13 +120,17 @@ fn exchange_rate(currency: &str, rates: &[CurrencyRate]) -> Option<(f64, Vec<Sou
     Some((usd_eur * eur_target, sources))
 }
 
-pub(super) fn estimate(
-    events: &[UsageEvent],
+pub(crate) fn estimate<'a>(
+    events: impl IntoIterator<Item = &'a UsageEvent>,
     rules: &[PricingRule],
     rates: &[CurrencyRate],
     currency: &str,
 ) -> ReportCost {
     let unknown = |reason| ReportCost::Unknown { reason };
+    let mut events = events.into_iter().peekable();
+    if events.peek().is_none() {
+        return unknown("No recorded tokens in this period".into());
+    }
     let mut total_usd = 0.0;
     let mut pricing_sources = Vec::new();
     for event in events {
