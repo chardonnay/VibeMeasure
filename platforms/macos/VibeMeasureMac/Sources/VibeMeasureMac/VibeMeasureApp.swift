@@ -229,6 +229,8 @@ final class VibeMeasureAppModel: ObservableObject {
     let usageStore: UsageRefreshStore
 
     private var cancellables = Set<AnyCancellable>()
+    private let alertPresenter = ForegroundAlertPresenter()
+    private var alertTask: Task<Void, Never>?
 
     init(
         providerStore: ProviderSettingsStore = ProviderSettingsStore(),
@@ -237,6 +239,17 @@ final class VibeMeasureAppModel: ObservableObject {
         self.providerStore = providerStore
         self.usageStore = usageStore
 
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            UNUserNotificationCenter.current().delegate = alertPresenter
+        }
+        alertTask = Task { [weak providerStore, weak usageStore] in
+            while !Task.isCancelled {
+                if let providerStore, let usageStore {
+                    await UsageAlerts.check(providers: providerStore.providers, readings: usageStore.liveUsageByProvider)
+                }
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
         usageStore.configure(providers: providerStore.providers)
         providerStore.$providers
             .sink { [weak usageStore] providers in
@@ -250,6 +263,7 @@ final class VibeMeasureAppModel: ObservableObject {
             }
             .store(in: &cancellables)
     }
+    deinit { alertTask?.cancel() }
 }
 
 @MainActor
@@ -1526,6 +1540,8 @@ struct WindowPreview: Identifiable {
     let percent: Double
     let resetText: String
     let displayModes: Set<DisplayMode>
+    let resetsAt: Date?
+    let quotaKey: String
     let hasKnownPercent: Bool
     let valueText: String?
 
@@ -1538,8 +1554,12 @@ struct WindowPreview: Identifiable {
         percent: Double?,
         resetText: String,
         displayModes: Set<DisplayMode> = [],
-        valueText: String? = nil
+        valueText: String? = nil,
+        resetsAt: Date? = nil,
+        quotaKey: String? = nil
     ) {
+        self.quotaKey = quotaKey ?? name
+        self.resetsAt = resetsAt
         self.name = name
         let fraction = percent.flatMap { $0.isFinite ? min(max($0, 0), 1) : nil }
         self.percent = fraction ?? 0
@@ -1553,7 +1573,7 @@ struct WindowPreview: Identifiable {
         self.init(name: window.label.isEmpty ? window.kind.rawValue : window.label,
                   percent: window.usedPercent / 100,
                   resetText: window.resetNote.isEmpty ? "Manual window" : window.resetNote,
-                  displayModes: window.kind.displayModes)
+                  displayModes: window.kind.displayModes, quotaKey: window.id.uuidString)
     }
 
     init(codexWindow: CodexRateLimitWindow, now: Date = Date()) {
@@ -1563,7 +1583,7 @@ struct WindowPreview: Identifiable {
         self.init(name: Self.codexWindowName(minutes: codexWindow.windowMinutes),
                   percent: hasReset ? nil : codexWindow.usedPercent / 100,
                   resetText: Self.codexResetText(resetsAt: resetsAt, relativeTo: now),
-                  displayModes: Self.codexDisplayModes(minutes: codexWindow.windowMinutes))
+                  displayModes: Self.codexDisplayModes(minutes: codexWindow.windowMinutes), resetsAt: resetsAt)
     }
 
     func matches(displayMode: DisplayMode) -> Bool {
@@ -1877,7 +1897,7 @@ struct ClaudeCodeUsageReader {
             seen.insert(name)
             windows.append(WindowPreview(name: name, percent: reset.map { $0 <= now } == true ? nil : percent / 100,
                 resetText: reset.map { WindowPreview.resetText(resetsAt: $0, relativeTo: now) } ?? "Claude Code weekly usage",
-                displayModes: [.oneWeek]))
+                displayModes: [.oneWeek], resetsAt: reset))
         }
         return windows
     }
@@ -1951,7 +1971,7 @@ struct CodexCliUsageReader {
                     windows.append(window)
                 } else {
                     windows.append(WindowPreview(name: "\(sample.limits.limitName ?? key) · \(window.name)",
-                        percent: window.hasKnownPercent ? window.percent : nil, resetText: window.resetText, displayModes: window.displayModes))
+                        percent: window.hasKnownPercent ? window.percent : nil, resetText: window.resetText, displayModes: window.displayModes, resetsAt: window.resetsAt))
                 }
             }
         }
@@ -2307,7 +2327,7 @@ struct MiniMaxModelRemain: Decodable {
             name: "\(quotaCategory.displayName) \(label)",
             percent: percent,
             resetText: [reset, detail].compactMap { $0 }.joined(separator: "; "),
-            displayModes: [mode]
+            displayModes: [mode], resetsAt: end.flatMap { $0 > 0 ? Date(timeIntervalSince1970: Double($0) / 1000) : nil }
         )
     }
 
@@ -2480,6 +2500,8 @@ struct ProviderEditor: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            AlertRuleEditor(rule: $provider.alerts).id(provider.id)
 
             Section("Manual windows") {
                 if provider.visibleManualWindows.isEmpty {
@@ -2755,6 +2777,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
     var isBuiltIn: Bool
     var isEnabled: Bool
     var pollIntervalMinutes: Int
+    var alerts = ProviderAlertRule()
     var manualWindows: [ManualUsageWindow]
 
     enum CodingKeys: String, CodingKey {
@@ -2768,6 +2791,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
         case isBuiltIn
         case isEnabled
         case pollIntervalMinutes
+        case alerts
         case manualWindows
     }
 
@@ -2808,6 +2832,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
         isBuiltIn = try container.decode(Bool.self, forKey: .isBuiltIn)
         isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
         pollIntervalMinutes = try container.decodeIfPresent(Int.self, forKey: .pollIntervalMinutes) ?? 5
+        alerts = try container.decodeIfPresent(ProviderAlertRule.self, forKey: .alerts) ?? ProviderAlertRule()
         manualWindows = try container.decode([ManualUsageWindow].self, forKey: .manualWindows)
         if !availableDataSources.contains(dataSource) {
             dataSource = visibleManualWindows.isEmpty ? .unknown : .manual
@@ -2867,7 +2892,7 @@ struct ProviderSettings: Codable, Identifiable, Equatable {
     }
 
     var canReadLiveUsage: Bool {
-        isEnabled && dataSource == .localAdapter && hasVerifiedLocalAdapter
+        (isEnabled || alerts.usageEnabled) && dataSource == .localAdapter && hasVerifiedLocalAdapter
     }
 }
 

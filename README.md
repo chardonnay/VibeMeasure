@@ -49,6 +49,18 @@ The Rust CLI imports Codex session logs into SQLite. Re-importing an unchanged s
 
 The macOS app polls enabled local readers in the background. The default interval is five minutes and can be configured per provider. Windows, GNOME, and Plasma display snapshots from an existing CLI database. The macOS app can publish enabled provider windows to its bundled WidgetKit extension.
 
+## Subscription and usage alerts
+
+You can enable either warning separately for each provider. Enter the subscription end date and a lead time of 0–365 calendar days. Zero means the day the subscription ends. Set a usage threshold of 1–100% to receive a notification when a measured quota reaches that percentage. Both warnings start switched off.
+
+| Platform | Where to configure alerts |
+| --- | --- |
+| macOS | Open Settings, select a provider, and save the thresholds under **Notifications**. Allow VibeMeasure notifications in System Settings. |
+| Windows | Choose **Settings → Notification settings** in the dashboard. Select a provider and save. |
+| Linux | Choose **Notification settings** in the GNOME menu or expanded Plasma widget. The editor requires Python 3 with Tk and delivery uses `notify-send`. |
+
+Keep the desktop app running or the Linux widget enabled. The monitor checks every minute, including while the dashboard is hidden. It uses your local calendar date and reminds you once per subscription end date. Usage warnings follow each provider quota window independently of the selected dashboard period. For quotas without a known reset, a reading below the threshold rearms the warning. Linux uses the latest data imported into its database.
+
 ## Display Modes
 
 The default first-run view is `Provider cycles`, but all built-in LLM providers are disabled for the menu-bar popover and widget until the user explicitly enables them in Settings.

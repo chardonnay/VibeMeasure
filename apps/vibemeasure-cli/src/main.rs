@@ -1,3 +1,4 @@
+mod alerts;
 mod display;
 mod pricing;
 
@@ -27,6 +28,22 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Catalog,
+    /// List per-provider notification settings, or open the Linux desktop editor.
+    AlertSettings {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        edit: bool,
+    },
+    /// Replace a provider's alert settings. Omit a threshold to disable that warning.
+    SetAlert(alerts::SetAlert),
+    /// Deliver newly due alerts through the desktop notification service.
+    CheckAlerts {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, hide = true)]
+        desktop_pipe: bool,
+    },
     InitDb {
         #[arg(long)]
         db: PathBuf,
@@ -119,6 +136,9 @@ fn run() -> vibemeasure_core::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::AlertSettings { db, edit } => alerts::settings(&db, edit)?,
+        Command::SetAlert(rule) => rule.save()?,
+        Command::CheckAlerts { db, desktop_pipe } => alerts::poll(&db, desktop_pipe)?,
         Command::Catalog => {
             println!("{}", serde_json::to_string_pretty(&catalog_json())?);
         }

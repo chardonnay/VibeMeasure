@@ -32,6 +32,17 @@ impl VibeStore {
         Ok(store)
     }
 
+    pub(crate) fn with_immediate_transaction(
+        &self,
+        operation: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        operation()?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn open_memory() -> Result<Self> {
         Self::from_connection(Connection::open_in_memory()?)
     }

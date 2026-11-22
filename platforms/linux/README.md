@@ -12,6 +12,19 @@ vibemeasure-cli import-codex --db "$db" --jsonl /path/to/rollout.jsonl
 vibemeasure-cli snapshot --db "$db" --mode provider-cycles --text
 ```
 
+## Notification settings
+
+Install `notify-send` (Debian/Ubuntu package `libnotify-bin`) for desktop delivery and Python 3 with Tk (`python3-tk`) for the graphical editor. Select **Notification settings** in either widget. Enter the provider's subscription end date and the number of days to warn in advance, a quota usage percentage, or both. A blank threshold disables that warning.
+
+You can also configure the same settings from the CLI. This example enables a reminder seven days before the supplied end date and a warning at 90% usage. Each save replaces the selected provider's settings.
+
+```bash
+vibemeasure-cli set-alert --db "$db" --tool codex --end-date 2027-01-31 --days-before 7 --used-percent 90
+vibemeasure-cli alert-settings --db "$db"
+```
+
+## Install the widgets
+
 For GNOME, pack and install the extension for a supported Shell version. Enable it from Extensions. Opening the menu refreshes its contents, with another read each minute while open.
 
 ```bash
