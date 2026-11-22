@@ -9,7 +9,7 @@ repository.workspace = true
 chrono = { version = "0.4", features = ["clock", "serde"] }
 quick-xml = "0.40.1"
 rusqlite = { version = "0.40.0", features = ["bundled"] }
-rust_xlsxwriter = "0.95.0"
+rust_xlsxwriter = "0.103.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0.18"
